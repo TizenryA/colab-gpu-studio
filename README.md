@@ -1,6 +1,4 @@
-> 开发中，未完成原规格全部验收，未部署。当前版本与剩余门槛见 [docs/CURRENT_STATUS.md](docs/CURRENT_STATUS.md)。真实GPU禁令持续生效。
-
-> 本地 v0.2 重构尚未完成、未发布：本轮仅 Mock/离线测试，禁止真实 Colab/Drive 业务调用、Runtime 分配及 CU 消耗。当前增量与已知缺口见 [离线实施记录](docs/OFFLINE_IMPLEMENTATION.md)，真实验证清单见 [REAL_GPU_VALIDATION](docs/REAL_GPU_VALIDATION.md)。以下原版本说明保留为基线文档。
+> 当前版本 0.1.31-dev.8：已部署，真实 Colab GPU 可用（批次/租约交接、同机复用已恢复的模型）。变更见 [更新说明_main_2026-11-05.md](更新说明_main_2026-11-05.md)。离线/Mock 验收文档仍在 docs/，见 [离线实施记录](docs/OFFLINE_IMPLEMENTATION.md)。
 
 # Colab GPU Studio
 

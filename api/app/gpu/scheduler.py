@@ -44,6 +44,7 @@ MAX_OUTPUT_BYTES = 100 * 1024 * 1024
 _STAGE_TEXT = {
     "restore_env": "正在恢复运行环境",
     "restore_weights": "正在恢复模型文件",
+    "warm_reuse": "同一台机器已有模型，直接复用",
     "comfy_start": "正在启动 ComfyUI",
     "sampling": "采样中",
     "prep_env": "正在构建环境缓存",
@@ -351,6 +352,25 @@ class Scheduler:
             return f"runtimes/{runtime_id}"
         return f"mock-runtime-{runtime_id}"
 
+    def _lease_handle(self, lease: dict) -> dict | None:
+        """The lease's runtime handle, always owned by the lease's current owner job.
+
+        Lease reuse (handoff / idle attach) moves owner_job_id; providers verify the handle against it,
+        so a handle that still names an earlier job is re-owned (and persisted) before any provider call.
+        """
+        handle = lease.get("handle")
+        owner = lease.get("owner_job_id")
+        if not isinstance(handle, dict) or not isinstance(owner, str):
+            return handle
+        if handle.get("job_id") == owner and handle.get("owner_job_id") == owner:
+            return handle
+        fixed = {**handle, "job_id": owner, "owner_job_id": owner}
+        try:
+            self._update("leases", lease["id"], {"handle": fixed}, lease.get("owner_id"))
+        except Exception:
+            logging.getLogger(__name__).warning("could not persist re-owned lease handle")
+        return fixed
+
     def _intent_handle(self, job: dict, lease: dict) -> dict | None:
         """Build only a lease-owned handle; never infer a platform runtime name."""
         runtime_id = lease.get("runtime_id")
@@ -638,7 +658,7 @@ class Scheduler:
         if not lease or not lease.get("handle"):
             return self._begin_failure(job, "gpu_lease_missing", "GPU lease is missing")
         try:
-            status = self._provider(job).inspect(lease["handle"])
+            status = self._provider(job).inspect(self._lease_handle(lease))
         except Exception as exc:
             return self._begin_failure(job, "gpu_runtime_inspect_failed", self._safe_error(exc))
         if status.get("deleted"):
@@ -664,13 +684,25 @@ class Scheduler:
         try:
             # The Drive token is attached to an in-memory copy only; it is never persisted.
             result = self._executor(job).start(
-                lease["handle"], {**job, "drive_cache": self._model_cache(job)}, execution_id
+                self._lease_handle(lease), {**job, "drive_cache": self._model_cache(job)}, execution_id
             )
         except Exception as exc:
             return self._begin_failure(job, "gpu_start_failed", self._safe_error(exc))
         if isinstance(result, dict) and result.get("execution_id") not in {None, execution_id}:
             return self._begin_failure(job, "gpu_execution_id_mismatch", "executor changed execution ID")
         return self._set_state(job, "running", "GPU execution started")
+
+    def _note_restored(self, job: dict, lease: dict, timings: dict) -> dict:
+        """Remember on the lease which environment the runtime now has, and whether this job reused it."""
+        signature = job.get("compatibility_signature")
+        skipped = "warm_reuse" in timings
+        try:
+            if signature and lease.get("restored_signature") != signature:
+                self._update("leases", lease["id"], {"restored_signature": signature}, job.get("owner_id"))
+            return self._update("jobs", job["id"], {"restore_skipped": skipped}, job.get("owner_id"))
+        except Exception:  # noqa: BLE001 - bookkeeping must never fail a finished job
+            logging.getLogger(__name__).warning("could not record restored environment")
+            return job
 
     def _model_cache(self, job: dict) -> dict | None:
         """Drive cache for reviewed model weights; None means download from Hugging Face."""
@@ -696,7 +728,7 @@ class Scheduler:
         if not lease:
             return self._begin_failure(job, "gpu_lease_missing", "GPU lease is missing")
         try:
-            result = self._executor(job).poll(lease["handle"], job)
+            result = self._executor(job).poll(self._lease_handle(lease), job)
         except Exception as exc:
             from .mcp import MCPTransient
 
@@ -711,6 +743,8 @@ class Scheduler:
             return self._begin_failure(job,'gpu_execution_id_mismatch','poll execution identity mismatch')
         state = result.get("state")
         timings = result.get("timings") if isinstance(result.get("timings"), dict) else None
+        if state == "completed":
+            job = self._note_restored(job, lease, timings or {})
         if state == "running":
             stage = result.get("stage")
             if stage in _STAGE_TEXT and stage != job.get("stage"):
@@ -1020,7 +1054,7 @@ class Scheduler:
         if self.clock() < next_epoch:
             return job
         provider = self._provider(job)
-        handle = lease.get("handle") or self._intent_handle(job, lease)
+        handle = self._lease_handle(lease) or self._intent_handle(job, lease)
         if handle is None:
             self._update(
                 "leases",
@@ -1205,7 +1239,7 @@ class Scheduler:
         ):
             return False
         job = {"id": owner_job_id, "owner_id": owner_id, "provider": lease.get("provider", "mock")}
-        handle = lease.get("handle") or self._intent_handle(job, lease)
+        handle = self._lease_handle(lease) or self._intent_handle(job, lease)
         if handle is None:
             return False
         if self.clock() < float(lease.get("cleanup_next_epoch") or 0):

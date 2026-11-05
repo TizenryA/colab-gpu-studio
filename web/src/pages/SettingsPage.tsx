@@ -1,35 +1,22 @@
 import { useState } from 'react';
+import { Settings, ChevronLeft, ChevronRight, Monitor, Gauge, Plug, Cpu, Layers, LogOut, Search, Square } from 'lucide-react';
 import { WorkflowsPanel } from './WorkflowManager';
 import { ThemePicker } from './ComputePage';
-import type {
-  ComputeSpec, GpuSettings, GpuUsage, GpuWorkflow,
-} from '../lib/gpu-api';
+import type { ComputeSpec, GpuSettings, GpuUsage, GpuWorkflow } from '../lib/gpu-api';
 import { GoogleOAuthSetup } from '../components/GoogleOAuthSetup';
 import { ComputeSpecs } from '../components/ComputeSpecs';
+import { Card } from '../components/ui';
 import styles from '../gpu.module.css';
-import { formatCu, shown } from '../lib/ui-helpers';
+import { cuNumber } from '../lib/ui-helpers';
 
 export function SettingsPanel({
-  settings,
-  usage,
-  specs,
-  workflows,
-  loading,
-  error,
-  onConnect,
-  onDisconnect,
-  onCheck,
-  onStop,
-  onImport,
-  onValidate,
-  onPublish,
-  onRollback,
-  onLogout,
-  onBack,
+  settings, usage, specs, specsNote = '', workflows, loading, error,
+  onConnect, onDisconnect, onCheck, onStop, onImport, onValidate, onPublish, onRollback, onLogout, onBack,
 }: {
   settings: GpuSettings | null;
   usage?: GpuUsage | null;
   specs: ComputeSpec[];
+  specsNote?: string;
   workflows: GpuWorkflow[];
   loading: string;
   error: string;
@@ -44,161 +31,102 @@ export function SettingsPanel({
   onLogout: () => void;
   onBack?: () => void;
 }) {
+  const [view, setView] = useState<'main' | 'workflows'>('main');
   const [oauthConfigured, setOauthConfigured] = useState(false);
 
   const activeCount = Number(usage?.active_runtimes ?? 0);
-  const dailyCap = Number(usage?.daily_limit || settings?.budget?.daily_units || 200);
-  const usedUnits = Number(usage?.actual_units || usage?.estimated_units || 0);
-  const pct = Math.min(100, Math.round((usedUnits / (dailyCap || 1)) * 100));
+  const dailyCap = Number(usage?.daily_limit || settings?.budget?.daily_units || 0);
+  const used = Number(usage?.actual_units || usage?.estimated_units || 0);
+  const pct = dailyCap > 0 ? Math.min(100, Math.round((used / dailyCap) * 100)) : 0;
+  const familyCount = new Set(workflows.map((w) => w.workflow_key)).size;
+
+  if (view === 'workflows') {
+    return (
+      <div className={styles.stack}>
+        <div className={styles.subHead}>
+          <button type="button" className={styles.backBtn} onClick={() => setView('main')}><ChevronLeft size={18} strokeWidth={1.6} aria-hidden />设置</button>
+          <h2>工作流与模型</h2>
+        </div>
+        <WorkflowsPanel workflows={workflows} onImport={onImport} onValidate={onValidate} onPublish={onPublish} onRollback={onRollback} />
+        {error && <p className="status error" role="alert">{error}</p>}
+      </div>
+    );
+  }
 
   return (
     <div className={styles.stack}>
-      {/* 顶部导航与返回 */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <button className="button secondary" style={{ minHeight: '34px' }} type="button" onClick={onBack}>
-          ← 返回工作台
-        </button>
-        <span className="pill">全站设置大本营</span>
+      <div className={styles.subHead}>
+        <button type="button" className={styles.backBtn} onClick={onBack}><ChevronLeft size={18} strokeWidth={1.6} aria-hidden />返回</button>
+        <h2><Settings size={20} strokeWidth={1.6} aria-hidden />设置</h2>
       </div>
 
-      {/* 1. 运行概览与配额 (Matching Image 4) */}
-      <section className={styles.card}>
-        <div className={styles.cardHead}>
-          <h2>运行概览与配额</h2>
-          <span className="pill">配额占用 {pct}%</span>
+      <Card icon={<Monitor size={17} strokeWidth={1.6} aria-hidden />} title="外观">
+        <ThemePicker />
+      </Card>
+
+      <Card icon={<Gauge size={17} strokeWidth={1.6} aria-hidden />} title="用量与额度" aside={<span className="pill">已用 {pct}%</span>}>
+        <div className={styles.grid2}>
+          <div className={styles.statBox}><small className="muted">运行中任务</small><strong>{activeCount}</strong></div>
+          <div className={styles.statBox}><small className="muted">每日上限</small><strong>{dailyCap || '—'}<em> CU</em></strong></div>
+          <div className={styles.statBox}><small className="muted">已用</small><strong>{cuNumber(used)}<em> CU</em></strong></div>
+          <div className={styles.statBox}><small className="muted">使用率</small><strong>{pct}%</strong></div>
         </div>
+      </Card>
 
-        <div className={styles.statGrid}>
-          <div className={styles.stat}>
-            <span>运行任务</span>
-            <strong style={{ fontSize: '1.25rem' }}>{activeCount}</strong>
-          </div>
-          <div className={styles.stat}>
-            <span>总配额</span>
-            <strong style={{ fontSize: '1.25rem' }}>{dailyCap} CU</strong>
-          </div>
-          <div className={styles.stat}>
-            <span>已用配额</span>
-            <strong style={{ fontSize: '1.25rem' }}>{formatCu(usedUnits, false)}</strong>
-          </div>
-          <div className={styles.stat}>
-            <span>使用率</span>
-            <strong style={{ fontSize: '1.25rem', color: pct > 80 ? 'var(--danger)' : 'var(--accent)' }}>
-              {pct}%
-            </strong>
-          </div>
-        </div>
-      </section>
-
-      {/* 2. Google 账号与授权连接 */}
-      <section className={styles.card}>
-        <div className={styles.cardHead}>
-          <h2>Google 连接</h2>
-          <span className="pill">
-            {settings?.offline_mode ? '离线 Mock 保护' : 'OAuth 授权'}
-          </span>
-        </div>
-
-        {(['colab', 'drive'] as const).map((purpose) => {
-          const state = settings?.google?.[purpose];
-          const isConnected = Boolean(state?.connected);
-          const isConfigured = oauthConfigured || Boolean(state?.configured);
-
-          return (
-            <div className={styles.workflowCard} key={purpose} style={{ marginBottom: '8px' }}>
-              <div className={styles.workflowHeader}>
-                <div>
-                  <strong>{purpose === 'colab' ? 'Google Colab 算力' : 'Google Drive 存储'}</strong>
-                  <div className={styles.workflowMeta}>
-                    <span>{isConnected ? '✓ 授权令牌有效' : isConfigured ? '已填 ClientID' : '尚未绑定'}</span>
-                  </div>
-                </div>
-
-                <span
-                  className="pill"
-                  style={{
-                    background: isConnected ? 'var(--accent-soft)' : 'var(--panel-strong)',
-                    color: isConnected ? 'var(--accent)' : 'var(--text-secondary)',
-                    borderColor: isConnected ? 'var(--accent)' : 'var(--line)',
-                  }}
-                >
-                  {isConnected ? '已连接' : isConfigured ? '已配置未连' : '未配置'}
+      <Card icon={<Plug size={17} strokeWidth={1.6} aria-hidden />} title="Google 连接" aside={settings?.offline_mode ? <span className="pill">离线模式</span> : undefined}>
+        <div className={styles.connList}>
+          {(['colab', 'drive'] as const).map((purpose) => {
+            const state = settings?.google?.[purpose];
+            const connected = Boolean(state?.connected);
+            const configured = oauthConfigured || Boolean(state?.configured);
+            const name = purpose === 'colab' ? 'Google Colab' : 'Google Drive';
+            const sub = purpose === 'colab' ? '用来启动和管理云端 GPU' : '用来保存和同步云端文件';
+            return (
+              <div className={styles.connItem} key={purpose}>
+                <span>
+                  <strong>{name}</strong>
+                  <small className="muted">{sub} · {connected ? '已连接' : configured ? '待授权' : '未配置'}</small>
                 </span>
-              </div>
-
-              <div className="actions" style={{ marginTop: '8px' }}>
-                <button
-                  className="button secondary"
-                  type="button"
-                  disabled={settings?.offline_mode === true || (!isConfigured && !isConnected)}
-                  onClick={() => onConnect(purpose)}
-                >
-                  {isConnected ? '重新授权' : `连接 ${purpose === 'colab' ? 'Colab' : 'Drive'}`}
-                </button>
-                {isConnected && (
-                  <button className="button danger" type="button" onClick={() => onDisconnect(purpose)}>
-                    断开连接
-                  </button>
+                {connected ? (
+                  <span className={styles.connBtns}>
+                    <button className="button secondary small" type="button" onClick={() => onConnect(purpose)} disabled={settings?.offline_mode === true}>重新授权</button>
+                    <button className="button danger small" type="button" onClick={() => onDisconnect(purpose)}>断开</button>
+                  </span>
+                ) : (
+                  <button className="button small" type="button" disabled={settings?.offline_mode === true || !configured} onClick={() => onConnect(purpose)}>连接</button>
                 )}
               </div>
-            </div>
-          );
-        })}
-
+            );
+          })}
+        </div>
         {!settings?.offline_mode && (
-          <details className="foldable" style={{ marginTop: '6px' }}>
-            <summary>OAuth 凭据配置面板</summary>
-            <div className="foldContent">
-              <GoogleOAuthSetup onConfigured={() => setOauthConfigured(true)} />
-            </div>
+          <details className="foldable">
+            <summary>Google 应用配置（首次使用）</summary>
+            <div className="foldContent"><GoogleOAuthSetup onConfigured={() => setOauthConfigured(true)} /></div>
           </details>
         )}
-      </section>
+      </Card>
 
-      {/* 3. GPU 资源管理 */}
-      <section className={styles.card}>
-        <div className={styles.cardHead}>
-          <h2>GPU 资源管理</h2>
-        </div>
-        <div className="actions">
-          <button className="button secondary" disabled={loading === 'check'} type="button" onClick={onCheck}>
-            {loading === 'check' ? '探查中…' : '检查可用 GPU'}
+      <Card icon={<Cpu size={17} strokeWidth={1.6} aria-hidden />} title="GPU">
+        <div className={styles.twoButtons}>
+          <button className="button" style={{ flex: 1 }} disabled={loading === 'check'} type="button" onClick={onCheck}>
+            <Search size={15} strokeWidth={1.8} aria-hidden />{loading === 'check' ? '检查中…' : '检查可用 GPU'}
           </button>
-          <button className="button danger" disabled={loading === 'stop'} type="button" onClick={onStop}>
-            {loading === 'stop' ? '急停中…' : '停止本地计算任务'}
+          <button className="button danger" style={{ flex: 1 }} disabled={loading === 'stop'} type="button" onClick={onStop}>
+            <Square size={13} strokeWidth={1.8} aria-hidden />{loading === 'stop' ? '停止中…' : '停止本地任务'}
           </button>
         </div>
+        {specsNote && <p className="muted small" role="status">{specsNote}</p>}
         {specs.length ? <ComputeSpecs specs={specs} /> : null}
-      </section>
+      </Card>
 
-      {/* 4. 工作流与模型管理 */}
-      <section className={styles.card}>
-        <div className={styles.cardHead}>
-          <h2>工作流与模型管理</h2>
-          <span className="pill">{workflows.length} 个版本</span>
-        </div>
-        <WorkflowsPanel
-          workflows={workflows}
-          onImport={onImport}
-          onValidate={onValidate}
-          onPublish={onPublish}
-          onRollback={onRollback}
-        />
-      </section>
+      <button type="button" className={styles.navRow} onClick={() => setView('workflows')}>
+        <Layers size={18} strokeWidth={1.5} aria-hidden />
+        <span><strong>工作流与模型</strong><small className="muted">{familyCount} 个工作流 · {workflows.length} 个版本</small></span>
+        <ChevronRight size={18} strokeWidth={1.5} aria-hidden />
+      </button>
 
-      {/* 5. 外观与退出登录 */}
-      <section className={styles.card}>
-        <div className={styles.cardHead}>
-          <h2>界面偏好</h2>
-        </div>
-        <ThemePicker />
-        <div style={{ textAlign: 'center', marginTop: '16px' }}>
-          <button className="button danger" style={{ width: '100%' }} type="button" onClick={onLogout}>
-            退出工作台登录
-          </button>
-        </div>
-      </section>
-
+      <button className="button secondary big" type="button" onClick={onLogout}><LogOut size={17} strokeWidth={1.6} aria-hidden />退出登录</button>
       {error && <p className="status error" role="alert">{error}</p>}
     </div>
   );

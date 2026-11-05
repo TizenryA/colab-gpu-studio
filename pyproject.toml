@@ -1,6 +1,6 @@
 [project]
 name = "colab-gpu-studio"
-version = "0.1.31-dev.3"
+version = "0.1.31-dev.8"
 description = "Independent mobile AI studio with on-demand compute"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }

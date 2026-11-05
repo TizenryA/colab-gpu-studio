@@ -138,18 +138,22 @@ class MockColabProvider:
     def _verify_handle(self, handle):
         name=handle.get('runtime_name','')
         record=self._runtimes.get(name) or self._tombstones.get(name)
-        if not record or not handle.get('mock') or any(handle.get(key)!=record.get(key) for key in ('runtime_id','request_id','job_id','owner_id')):
+        if not record or not handle.get('mock') or any(handle.get(key)!=record.get(key) for key in ('runtime_id','request_id','owner_id')):
             raise ComputeError('mock runtime handle identity mismatch')
         return record
 
     def recover_handle(self, handle):
         record=self._runtimes.get(handle.get('runtime_name')) or self._tombstones.get(handle.get('runtime_name'))
-        if not record or any(record.get(key)!=handle.get(key) for key in ('runtime_id','request_id','job_id')):
+        if not record or any(record.get(key)!=handle.get(key) for key in ('runtime_id','request_id')):
             raise ComputeError('mock recovery identity mismatch')
         if record.get('owner_id') not in {None,handle.get('owner_id')}:
             raise ComputeError('mock recovery owner identity mismatch')
         record['owner_id']=handle.get('owner_id')
-        return dict(record)
+        recovered=dict(record)
+        for key in ('job_id','owner_job_id'):  # job ownership comes from the lease-owned handle, not the create-time record
+            if key in handle:
+                recovered[key]=handle[key]
+        return recovered
 
     def bind_owner(self, handle, owner_id):
         record=self._verify_handle(handle)
@@ -232,6 +236,7 @@ class MockGPUExecutor:
         self._executions[execution_id] = {
             "signature": job.get('compatibility_signature'),
             "worker_session_id": session['id'],
+            "restore_skipped": bool(session['restore_skipped'].get(execution_id)),
             "runtime": handle.get('runtime_name'),
             "owner_id": job.get('owner_id'),
             "remaining": self.polls_before_complete,
@@ -277,7 +282,8 @@ class MockGPUExecutor:
             "metadata": {"mock": True, "label": "MOCK"},
         }
         self.outputs.append(output)
-        return {"state": "completed", "outputs": [output]}
+        timings = {"warm_reuse": 0.0} if state.get("restore_skipped") else {"restore_weights": 0.0}
+        return {"state": "completed", "outputs": [output], "timings": timings}
 
 
 class DisabledProvider:

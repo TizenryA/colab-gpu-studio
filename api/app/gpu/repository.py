@@ -125,6 +125,13 @@ def ensure_schema(store: Store) -> None:
             time.sleep(0.03 * (attempt + 1))
 
 
+def retarget_handle(handle, job_id):
+    """Return the runtime handle re-owned by job_id (providers check handle ownership against the lease owner)."""
+    if not isinstance(handle, dict):
+        return handle
+    return {**handle, 'job_id': job_id, 'owner_job_id': job_id}
+
+
 class Repository:
     def __init__(self, store: Store):
         self.store = store
@@ -405,8 +412,8 @@ class Repository:
                 data.update(batch_id=batch_id, queue_order=index, state="queued",
                             execution_policy={**data.get("execution_policy", {}), **policy},
                             provider=data.get("execution_policy", {}).get("provider", "mock"))
-                if data['provider'] != 'mock':
-                    raise ValueError('batch real provider is not authorized')
+                if data['provider'] not in {'mock', 'colab'}:
+                    raise ValueError('batch provider is not authorized')
                 data['compatibility_signature'] = digest({
                     'provider':data['provider'],
                     'environment':{k:v for k,v in (data.get('snapshot') or {}).items()
@@ -440,7 +447,8 @@ class Repository:
                 return False
             lease.state='active'
             lease.data={**lease.data,'state':'active','owner_job_id':job_id,'current_job_id':job_id,
-                        'last_active_at':now,'idle_deadline_at':None}
+                        'last_active_at':now,'idle_deadline_at':None,
+                        **({'handle':retarget_handle(lease.data['handle'],job_id)} if isinstance(lease.data.get('handle'),dict) else {})}
             job.data={**job.data,'lease_id':lease_id,'deadline_epoch':lease.data['deadline_epoch']}
             for row in (lease,job):
                 row.version+=1
@@ -473,8 +481,11 @@ class Repository:
             job.state='completed'
             following.data={**following.data,'lease_id':lease_id,
                             'deadline_epoch':lease.data['deadline_epoch']}
+            handle=lease.data.get('handle')
+            # Handle ownership must follow the lease owner for every provider (real ones verify it).
             lease.data={**lease.data,'owner_job_id':next_job_id,'current_job_id':next_job_id,
-                        'last_active_at':now,'state':'active'}
+                        'last_active_at':now,'state':'active',
+                        **({'handle':retarget_handle(handle,next_job_id)} if isinstance(handle,dict) else {})}
             lease.state='active'
             execution=session.get(GpuExecutionRow,job.data.get('execution_id'))
             if execution is not None:

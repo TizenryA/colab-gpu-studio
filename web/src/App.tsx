@@ -4,6 +4,7 @@ import { TasksPanel } from './pages/JobsPage';
 import { CreatePanel } from './pages/CreatePage';
 import { ComputePage, ThemePicker } from './pages/ComputePage';
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { Sparkles, Zap, Image as ImageIcon, Cpu, Settings as SettingsIcon, Folder, ChevronDown, X, Plus, Check, Maximize2, Star, Download, Trash2, RotateCcw, Triangle } from 'lucide-react';
 import {
   apiMessage, assetUrl, cancelGpuJob, createGpuJob, createGpuBatch, createProject, deleteAsset, disconnectGoogle,
   getGpuComputeSpecs, getGpuGallery, getGpuJob, getGpuJobs, getGpuModels,
@@ -110,8 +111,8 @@ function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   return (
     <main className="login">
       <form className="loginCard" onSubmit={submit}>
-        <h1>Colab GPU Studio</h1>
-        <p className="muted">输入访问密码解锁独立工作台</p>
+        <div className="brand"><span className="brandMark"><Triangle size={16} strokeWidth={1.6} aria-hidden /></span><h1>Colab GPU Studio</h1></div>
+        <p className="muted">输入访问密码进入工作台</p>
         <label>
           访问密码
           <input
@@ -120,12 +121,12 @@ function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
             value={password}
             onChange={(event) => setPassword(event.target.value)}
             autoComplete="current-password"
-            placeholder="请输入 STUDIO_PASSWORD"
+            placeholder="请输入密码"
             required
           />
         </label>
         {error && <p className="status error" role="alert">{error}</p>}
-        <button className="button" disabled={busy} type="submit">
+        <button className="button big" disabled={busy} type="submit">
           {busy ? '登录中…' : '进入工作台'}
         </button>
       </form>
@@ -133,34 +134,75 @@ function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   );
 }
 
+const PROJECT_KEY = 'colab-gpu-studio-project';
+function savedProjectId(): string { try { return localStorage.getItem(PROJECT_KEY) || ''; } catch { return ''; } }
+function saveProjectId(id: string) { try { if (id) localStorage.setItem(PROJECT_KEY, id); } catch { /* storage can be unavailable */ } }
+
 function ProjectSheet({
   open,
   projects,
   projectId,
   onClose,
   onSelect,
-  onCreate,
 }: {
   open: boolean;
   projects: Project[];
   projectId: string;
   onClose: () => void;
   onSelect: (id: string) => void;
-  onCreate: (title: string) => Promise<void>;
+}) {
+  if (!open) return null;
+  return (
+    <div className={styles.dialogBackdrop} role="presentation" onClick={onClose}>
+      <section className={styles.dialog} role="dialog" aria-modal="true" aria-label="切换项目" onClick={(e) => e.stopPropagation()}>
+        <div className={styles.cardHead}>
+          <h2>切换项目</h2>
+          <button className={styles.iconGhost} type="button" aria-label="关闭" onClick={onClose}><X size={18} strokeWidth={1.6} aria-hidden /></button>
+        </div>
+        {projects.length === 0 && <p className="muted">还没有项目，点右上角的 ＋ 新建一个。</p>}
+        <ul className="projectList">
+          {projects.map((p) => (
+            <li key={p.id}>
+              <button
+                type="button"
+                className="projectRow"
+                aria-current={p.id === projectId ? 'true' : undefined}
+                onClick={() => { onSelect(p.id); onClose(); }}
+              >
+                <span>{p.title}</span>
+                {p.id === projectId && <Check size={16} strokeWidth={1.8} aria-label="当前项目" />}
+              </button>
+            </li>
+          ))}
+        </ul>
+      </section>
+    </div>
+  );
+}
+
+function NewProjectDialog({
+  open,
+  onClose,
+  onCreate,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onCreate: (title: string) => Promise<boolean>;
 }) {
   const [title, setTitle] = useState('');
   const [creating, setCreating] = useState(false);
-
   if (!open) return null;
 
   async function handleCreate(e: FormEvent) {
     e.preventDefault();
-    if (!title.trim()) return;
+    const name = title.trim();
+    if (!name || creating) return;
     setCreating(true);
     try {
-      await onCreate(title.trim());
-      setTitle('');
-      onClose();
+      if (await onCreate(name)) {
+        setTitle('');
+        onClose();
+      }
     } finally {
       setCreating(false);
     }
@@ -168,55 +210,23 @@ function ProjectSheet({
 
   return (
     <div className={styles.dialogBackdrop} role="presentation" onClick={onClose}>
-      <section
-        className={styles.dialog}
-        role="dialog"
-        aria-modal="true"
-        aria-label="项目管理"
-        onClick={(e) => e.stopPropagation()}
-      >
+      <form className={styles.dialog} role="dialog" aria-modal="true" aria-label="新建项目" onClick={(e) => e.stopPropagation()} onSubmit={handleCreate}>
         <div className={styles.cardHead}>
-          <h2>项目管理</h2>
-          <button className="button secondary" type="button" onClick={onClose}>完成</button>
+          <h2>新建项目</h2>
+          <button className={styles.iconGhost} type="button" aria-label="关闭" onClick={onClose}><X size={18} strokeWidth={1.6} aria-hidden /></button>
         </div>
         <div className="field">
-          <label>选择当前项目</label>
-          <select
-            value={projectId}
-            onChange={(e) => {
-              onSelect(e.target.value);
-              onClose();
-            }}
-          >
-            <option value="">未选择项目</option>
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>{p.title}</option>
-            ))}
-          </select>
+          <label htmlFor="project-new">项目名称</label>
+          <input id="project-new" autoFocus maxLength={80} placeholder="例如：符玄和青雀" value={title} onChange={(e) => setTitle(e.target.value)} />
         </div>
-        <form className="field" onSubmit={handleCreate}>
-          <label>新建项目</label>
-          <div className="actions" style={{ display: 'flex', gap: '2vw' }}>
-            <input
-              className="fieldInput"
-              style={{ flex: 1 }}
-              placeholder="项目名称"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-            />
-            <button className="button" disabled={creating || !title.trim()} type="submit">
-              {creating ? '创建中…' : '创建'}
-            </button>
-          </div>
-        </form>
-      </section>
+        <div className={styles.inlineForm}>
+          <button className="button secondary" type="button" onClick={onClose}>取消</button>
+          <button className="button" disabled={creating || !title.trim()} type="submit">{creating ? '创建中…' : '创建'}</button>
+        </div>
+      </form>
     </div>
   );
 }
-
-
-
-
 
 export default function App() {
   const [loggedIn, setLoggedIn] = useState(isLoggedIn());
@@ -224,6 +234,7 @@ export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState('');
   const [showProjectSheet, setShowProjectSheet] = useState(false);
+  const [showNewProject, setShowNewProject] = useState(false);
   const currentProjectId = useRef(projectId);
   currentProjectId.current = projectId;
 
@@ -246,6 +257,7 @@ export default function App() {
   const [settings, setSettings] = useState<GpuSettings | null>(null);
   const [usage, setUsage] = useState<GpuUsage | null>(null);
   const [specs, setSpecs] = useState<ComputeSpec[]>([]);
+  const [specsNote, setSpecsNote] = useState('');
   const [error, setError] = useState('');
   const [jobError, setJobError] = useState('');
   const [loading, setLoading] = useState('');
@@ -289,7 +301,13 @@ export default function App() {
       const [projR, modR, wfR, preR, setR, useR] = results;
       if (projR.status === 'fulfilled') {
         setProjects(projR.value);
-        setProjectId((curr) => curr || projR.value[0]?.id || '');
+        // Restore the last chosen project when it still exists; otherwise fall back to the first one.
+        const list = projR.value;
+        setProjectId((curr) => {
+          if (curr && list.some((p) => p.id === curr)) return curr;
+          const saved = savedProjectId();
+          return (saved && list.some((p) => p.id === saved) ? saved : list[0]?.id) || '';
+        });
       } else setError(apiMessage(projR.reason));
       if (modR.status === 'fulfilled') setModels(modR.value);
       if (wfR.status === 'fulfilled') {
@@ -409,13 +427,20 @@ export default function App() {
     }
   }, [againJob, workflows]);
 
-  async function createLocalProject(title: string) {
+  function chooseProject(id: string) {
+    setProjectId(id);
+    saveProjectId(id);
+  }
+
+  async function createLocalProject(title: string): Promise<boolean> {
     try {
       const created = await createProject(title);
       setProjects((curr) => [created, ...curr]);
-      setProjectId(created.id);
+      chooseProject(created.id);
+      return true;
     } catch (cause) {
       setError(apiMessage(cause));
+      return false;
     }
   }
 
@@ -478,10 +503,12 @@ export default function App() {
           idle_grace_minutes: 0 as const,
         },
       };
-      if (runtime === 'mock') {
+      if (runtime === 'mock' || batchCount > 1) {
+        // 真实 GPU 的多张任务走「批次」：同批共用一台机器（智能策略暂只支持模拟）
+        const mode = runtime === 'mock' ? batchMode : 'batch';
         await createGpuBatch(Array.from({length:batchCount},(_,index)=>({...body,
           params:{...body.params,...(typeof body.params.seed === 'number' && body.params.seed >= 0 ? {seed:body.params.seed+index} : {})}})),
-          batchMode,120,idempotencyKey.current);
+          mode,120,idempotencyKey.current);
       } else {
         await createGpuJob(body, idempotencyKey.current);
       }
@@ -575,14 +602,30 @@ export default function App() {
   }
 
   async function checkGpu() {
-    await action('check', async () => setSpecs(await getGpuComputeSpecs(settings?.google?.colab?.connected ? 'colab' : 'mock')));
+    const canReal = settings?.real_enabled === true && settings?.offline_mode !== true && settings?.google?.colab?.connected === true;
+    setSpecs([]);
+    setSpecsNote('');
+    await action('check', async () => {
+      if (!canReal) {
+        // 真实 GPU 没启用或 Colab 没连接：明确改查模拟，不假装查了真实机器
+        setSpecs(await getGpuComputeSpecs('mock'));
+        setSpecsNote(settings?.offline_mode === true
+          ? '站点处于离线测试模式，下面是「模拟」GPU，不是真实 Colab 机器。'
+          : settings?.real_enabled !== true
+            ? '真实 GPU 未启用，下面是「模拟」GPU，不是真实 Colab 机器。'
+            : 'Colab 还没连接，下面是「模拟」GPU。请先到「设置」连接 Colab。');
+        return;
+      }
+      setSpecs(await getGpuComputeSpecs('colab'));
+      setSpecsNote('已查询 Google Colab：有申请资格不等于现在一定有空闲 GPU。');
+    });
   }
 
   async function stopCompute() {
     await action('stop', async () => {
       await stopGpuCompute();
       setConfirm(null);
-      setError('已请求急停。');
+      setError('已发出停止请求。');
     });
   }
 
@@ -592,12 +635,13 @@ export default function App() {
         if (viewer) setViewer(null);
         else if (detail) setDetail(null);
         else if (confirm) setConfirm(null);
+        else if (showNewProject) setShowNewProject(false);
         else if (showProjectSheet) setShowProjectSheet(false);
       }
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [viewer, detail, confirm, showProjectSheet]);
+  }, [viewer, detail, confirm, showProjectSheet, showNewProject]);
 
   if (!loggedIn) {
     return <Login onLoggedIn={() => { setLoggedIn(true); setLoginRefresh((c) => c + 1); }} />;
@@ -605,65 +649,37 @@ export default function App() {
 
   return (
     <div className="app">
-      {/* 顶栏 */}
       <header className="topbar">
         <div className="brand">
-          Colab GPU Studio
-          <small>{settings?.offline_mode ? 'Mock / 离线演示' : '个人创作工作台'}</small>
+          <span className="brandMark"><Triangle size={16} strokeWidth={1.6} aria-hidden /></span>
+          <span className="brandText">
+            <strong>Colab GPU Studio</strong>
+            <small>{settings?.offline_mode ? '离线演示' : '个人创作工作台'}</small>
+          </span>
         </div>
-
-        {/* PC 端主导航 Tab (Desktop Topbar Navigation) */}
-        <nav className="desktopNav" aria-label="桌面端导航">
-          {tabs.map((item) => {
-            const isActive = tab === item;
-            return (
-              <button
-                key={item}
-                type="button"
-                aria-current={isActive ? 'page' : undefined}
-                onClick={() => setTab(item)}
-              >
-                <span className="navIcon">{item === '创作' ? '✦' : item === '任务' ? '⚡' : item === '作品' ? '🖼' : '⚙'}</span>
-                <span>{item}</span>
-                {item === '任务' && activeJobsCount > 0 && (
-                  <span className="tabBadge" style={{ position: 'static', marginLeft: '4px' }}>{activeJobsCount}</span>
-                )}
-              </button>
-            );
-          })}
-        </nav>
-
         <div className="topbarActions">
-          <button
-            className="projectChip"
-            type="button"
-            onClick={() => setShowProjectSheet(true)}
-          >
-            <span>📁 {activeProject ? activeProject.title : '三月七'}</span>
-            <small style={{ color: 'var(--muted)', marginLeft: '4px' }}>▾</small>
+          <button className="projectChip" type="button" aria-label="切换项目" onClick={() => setShowProjectSheet(true)}>
+            <Folder size={15} strokeWidth={1.6} aria-hidden />
+            <span>{activeProject ? activeProject.title : '选择项目'}</span>
+            <ChevronDown size={14} strokeWidth={1.6} aria-hidden />
           </button>
-          <button className="settingsButton" aria-label="打开设置" onClick={() => setTab('设置')}>
-            ⚙
+          <button className="iconButton" type="button" aria-label="新建项目" title="新建项目" onClick={() => setShowNewProject(true)}>
+            <Plus size={18} strokeWidth={1.6} aria-hidden />
+          </button>
+          <button className="iconButton" aria-label="打开设置" onClick={() => setTab('设置')}>
+            <SettingsIcon size={18} strokeWidth={1.6} aria-hidden />
           </button>
         </div>
       </header>
 
-      {/* 导航栏：移动端吸底，电脑端在顶栏下方优雅排列 */}
       <nav className="bottomNav" aria-label="工作区导航">
         {tabs.map((item) => {
-          const isActive = tab === item;
+          const Icon = item === '创作' ? Sparkles : item === '任务' ? Zap : item === '作品' ? ImageIcon : Cpu;
           return (
-            <button
-              key={item}
-              type="button"
-              aria-current={isActive ? 'page' : undefined}
-              onClick={() => setTab(item)}
-            >
-              <span>{item === '创作' ? '✦' : item === '任务' ? '⚡' : item === '作品' ? '🖼' : '⚙'}</span>
+            <button key={item} type="button" aria-current={tab === item ? 'page' : undefined} onClick={() => setTab(item)}>
+              <Icon size={21} strokeWidth={1.5} aria-hidden />
               <span>{item}</span>
-              {item === '任务' && activeJobsCount > 0 && (
-                <span className="tabBadge">{activeJobsCount}</span>
-              )}
+              {item === '任务' && activeJobsCount > 0 && <span className="tabBadge">{activeJobsCount}</span>}
             </button>
           );
         })}
@@ -675,9 +691,9 @@ export default function App() {
         projects={projects}
         projectId={projectId}
         onClose={() => setShowProjectSheet(false)}
-        onSelect={setProjectId}
-        onCreate={createLocalProject}
+        onSelect={chooseProject}
       />
+      <NewProjectDialog open={showNewProject} onClose={() => setShowNewProject(false)} onCreate={createLocalProject} />
 
       {/* 主工作区 */}
       <main className={styles.page}>
@@ -755,6 +771,9 @@ export default function App() {
             onCheck={() => void checkGpu()}
             loadingStop={loading === 'stop'}
             loadingCheck={loading === 'check'}
+            specs={specs}
+            specsNote={specsNote}
+            error={error}
           />
         )}
         {tab === '设置' && (
@@ -762,6 +781,7 @@ export default function App() {
             settings={settings}
             usage={usage}
             specs={specs}
+            specsNote={specsNote}
             workflows={workflows}
             loading={loading}
             error={error}
@@ -808,12 +828,13 @@ export default function App() {
             onClick={(e) => e.stopPropagation()}
           >
             <h2>确认开始生成</h2>
-            <p>
-              工作流：<strong>{activeWorkflow.workflow_key} · v{activeWorkflow.workflow_version}</strong><br />
-              运行环境：<strong>{runtime === 'colab' ? 'Colab GPU' : '离线模拟'}</strong><br />
-              {runtime === 'colab' && <>最长限时：<strong>{maxRuntime} 分钟</strong></>}
-            </p>
-            {error && <p className="status error" role="alert">{error}；请刷新结果确认，或沿用本次请求重试。</p>}
+            <dl className={styles.kv}>
+              <dt>工作流</dt><dd>{activeWorkflow.workflow_key} · v{activeWorkflow.workflow_version}</dd>
+              <dt>运行方式</dt><dd>{runtime === 'colab' ? 'Colab GPU（会扣 CU）' : '离线模拟（不扣 CU）'}</dd>
+              <dt>数量</dt><dd>{batchCount}</dd>
+              {runtime === 'colab' && <><dt>最长运行</dt><dd>{maxRuntime} 分钟</dd></>}
+            </dl>
+            {error && <p className="status error" role="alert">{error}。可到「任务」页确认是否已提交，或直接再点一次确认。</p>}
             <div className="actions">
               <button className="button secondary" type="button" onClick={() => setConfirm(null)}>取消</button>
               <button className="button" disabled={loading === 'submit'} type="button" onClick={() => void submitJob()}>
@@ -831,110 +852,97 @@ export default function App() {
             className={styles.dialog}
             role="dialog"
             aria-modal="true"
-            aria-label="确认急停"
+            aria-label="确认停止"
             onClick={(e) => e.stopPropagation()}
           >
-            <h2>确认急停全部计算任务？</h2>
-            <p className="error">这会请求取消当前所有运行中任务并释放关联的 Colab GPU 运行时。</p>
+            <h2>停止全部任务？</h2>
+            <p className="muted">会取消所有正在跑的任务，并关闭对应的 Colab GPU 机器。已经花掉的 CU 不会退回。</p>
             <div className="actions">
               <button className="button secondary" type="button" onClick={() => setConfirm(null)}>取消</button>
-              <button className="button danger" type="button" onClick={() => void stopCompute()}>确认急停</button>
+              <button className="button danger" type="button" onClick={() => void stopCompute()}>确认停止</button>
             </div>
           </section>
         </div>
       )}
 
-      {/* 任务详情抽屉 */}
+      {/* 任务详情 */}
       {detail && (
         <div className={styles.dialogBackdrop} role="presentation" onClick={() => setDetail(null)}>
-          <section
-            className={styles.dialog}
-            role="dialog"
-            aria-modal="true"
-            aria-label="任务详情"
-            onClick={(e) => e.stopPropagation()}
-          >
+          <section className={styles.dialog} role="dialog" aria-modal="true" aria-label="任务详情" onClick={(e) => e.stopPropagation()}>
             <div className={styles.cardHead}>
               <h2>任务详情 · {detail.id.slice(0, 8)}</h2>
-              <button className="button secondary" type="button" onClick={() => setDetail(null)}>关闭</button>
+              <button className={styles.iconGhost} type="button" aria-label="关闭" onClick={() => setDetail(null)}><X size={18} strokeWidth={1.6} aria-hidden /></button>
             </div>
-            <p>
-              状态：<strong>{readableState(detail.state)}</strong> · 环境：<strong>{detail.provider}</strong><br />
-              创建时间：{String(detail.created_at || '未知')}
-            </p>
+            <dl className={styles.kv}>
+              <dt>状态</dt><dd>{readableState(detail.state)}</dd>
+              <dt>运行方式</dt><dd>{detail.provider === 'mock' ? '离线模拟' : detail.provider === 'colab' ? 'Colab GPU' : shown(detail.provider)}</dd>
+              <dt>创建时间</dt><dd>{String(detail.created_at || '未知')}</dd>
+            </dl>
             {Array.isArray(detail.attempts) && <details className="foldable" open>
               <summary>执行记录</summary>
-              {detail.attempts.length ? detail.attempts.map((attempt: Record<string, unknown>) => <p key={String(attempt.id)}>
-                第 {String(attempt.attempt)} 次 · {readableState(String(attempt.state))}
-                {attempt.error_code ? ` · ${String(attempt.error_code)}` : ''}
-              </p>) : <p>尚未启动执行</p>}
+              <div className="foldContent">
+                {detail.attempts.length ? detail.attempts.map((attempt: Record<string, unknown>) => <p key={String(attempt.id)}>
+                  第 {String(attempt.attempt)} 次 · {readableState(String(attempt.state))}
+                  {attempt.error_code ? ` · ${String(attempt.error_code)}` : ''}
+                </p>) : <p className="muted">还没有开始执行</p>}
+              </div>
             </details>}
             {detail.timings ? (
-              <details className="foldable" open>
-                <summary>阶段耗时记录</summary>
-                <div className="foldContent">
-                  <pre className={styles.diagnostics}>{JSON.stringify(detail.timings, null, 2)}</pre>
-                </div>
+              <details className="foldable">
+                <summary>各阶段耗时</summary>
+                <div className="foldContent"><pre className={styles.diagnostics}>{JSON.stringify(detail.timings, null, 2)}</pre></div>
               </details>
             ) : null}
             {detail.resolved_params ? (
               <details className="foldable">
-                <summary>参数快照</summary>
-                <div className="foldContent">
-                  <pre className={styles.diagnostics}>{JSON.stringify(detail.resolved_params, null, 2)}</pre>
-                </div>
+                <summary>本次使用的参数</summary>
+                <div className="foldContent"><pre className={styles.diagnostics}>{JSON.stringify(detail.resolved_params, null, 2)}</pre></div>
               </details>
             ) : null}
           </section>
         </div>
       )}
 
-      {/* 作品查看器抽屉 */}
+      {/* 作品查看 */}
       {viewer && (
         <div className={styles.dialogBackdrop} role="presentation" onClick={() => setViewer(null)}>
-          <section
-            className={styles.dialog}
-            role="dialog"
-            aria-modal="true"
-            aria-label="查看作品"
-            onClick={(e) => e.stopPropagation()}
-          >
+          <section className={styles.dialog} role="dialog" aria-modal="true" aria-label="查看作品" onClick={(e) => e.stopPropagation()}>
             <div className={`${styles.cardHead} ${styles.viewerHead}`}>
               <h2>{viewer.filename || viewer.id}</h2>
               <div className={styles.viewerHeadActions}>
-                <button className="button secondary" type="button" onClick={async (event) => {
+                <button className="button secondary small" type="button" onClick={async (event) => {
                   const panel = event.currentTarget.closest('section');
                   try {
                     if (document.fullscreenElement) await document.exitFullscreen();
                     else if (panel?.requestFullscreen) await panel.requestFullscreen();
-                    else throw new Error('当前浏览器不支持全屏，请使用作品预览');
+                    else throw new Error('当前浏览器不支持全屏');
                   } catch (error) { setError(apiMessage(error)); }
-                }}>全屏查看</button>
-                <button className="button secondary" type="button" onClick={async () => {
+                }}><Maximize2 size={14} strokeWidth={1.6} aria-hidden />全屏查看</button>
+                <button className="button secondary small" type="button" onClick={async () => {
                   if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
                   setViewer(null);
                 }}>关闭</button>
               </div>
             </div>
             {viewer.mime.startsWith('video/') ? (
-              <video className={styles.viewerVideo} src={assetUrl(viewer)} controls autoPlay />
+              <video className={styles.viewerVideo} src={assetUrl(viewer)} controls autoPlay playsInline />
             ) : viewer.mime.startsWith('image/') ? (
               <img className={styles.viewerImage} src={assetUrl(viewer)} alt="" />
             ) : (
-              <p className="muted">诊断文件不可直接预览，请下载查看。</p>
+              <p className="muted">这是诊断文件，不能直接预览，请下载查看。</p>
             )}
-            <div className="actions">
-              <button className="button secondary" type="button" onClick={() => void favorite(viewer)}>
-                {viewer.favorite ? '取消收藏' : '收藏'}
+            <div className={styles.viewerActions}>
+              <button className="button secondary small" type="button" onClick={() => void favorite(viewer)}>
+                <Star size={14} strokeWidth={1.6} aria-hidden />{viewer.favorite ? '取消收藏' : '收藏'}
               </button>
-              <button className="button secondary" type="button" onClick={() => void reuseAsset(viewer)}>
-                以此参数再来一次
+              <button className="button secondary small" type="button" onClick={() => void reuseAsset(viewer)}>
+                <RotateCcw size={14} strokeWidth={1.6} aria-hidden />用同样参数再来一次
               </button>
-              <a className="button secondary" href={assetUrl(viewer)} download={viewer.filename || viewer.id} target="_blank" rel="noreferrer">
-                下载产物
+              <a className="button secondary small" href={assetUrl(viewer)} download={viewer.filename || viewer.id} target="_blank" rel="noreferrer">
+                <Download size={14} strokeWidth={1.6} aria-hidden />下载
               </a>
-              <button className="button danger" type="button" onClick={() => void remove(viewer)}>
-                删除作品
+              <button className="button danger small" type="button" onClick={() => void remove(viewer)}>
+                <Trash2 size={14} strokeWidth={1.6} aria-hidden />删除
               </button>
             </div>
           </section>

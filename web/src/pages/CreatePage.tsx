@@ -1,53 +1,54 @@
-import { useMemo, useState, useEffect } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import {
+  Sparkles, Image as ImageIcon, Film, Layers, Pencil, SlidersHorizontal, Play, Monitor, Cloud,
+  ChevronRight, Minus, Plus, X, Check,
+} from 'lucide-react';
 import type {
   GalleryAsset, GpuManifest, GpuModel, GpuPreset, GpuSettings, GpuWorkflow, Provider,
 } from '../lib/gpu-api';
-import { GpuParamForm } from '../components/GpuParamForm';
+import { GpuParamForm, splitParams } from '../components/GpuParamForm';
 import { ReferencePicker, supportsReferences } from '../components/ReferencePicker';
+import { Card, InfoTip, Segmented } from '../components/ui';
+import { RUNTIME_HELP, STRATEGIES } from '../lib/labels';
+import { parameterList, parameterKey, shown } from '../lib/ui-helpers';
 import styles from '../gpu.module.css';
-import { shown } from '../lib/ui-helpers';
 
-type TaskCategory = 'image' | 'video';
+type Category = 'image' | 'video';
 
-const RATIO_PRESETS = [
-  { label: '1:1', desc: '方形头像', w: 992, h: 992 },
-  { label: '3:4', desc: '竖屏立绘', w: 768, h: 1024 },
-  { label: '9:16', desc: '全屏海报', w: 576, h: 1024 },
-  { label: '4:3', desc: '经典横版', w: 1024, h: 768 },
-  { label: '16:9', desc: '宽屏壁纸', w: 1024, h: 576 },
-];
+const isVideoKey = (key: string) => /i2v|video|ref2v|t2v/i.test(key);
+
+/** 常用画幅。图片使用固定尺寸表；视频等小分辨率工作流按工作流默认像素量等比换算。 */
+const RATIOS = [
+  { label: '1:1', rw: 1, rh: 1, size: [992, 992] },
+  { label: '3:4', rw: 3, rh: 4, size: [768, 1024] },
+  { label: '9:16', rw: 9, rh: 16, size: [576, 1024] },
+  { label: '4:3', rw: 4, rh: 3, size: [1024, 768] },
+  { label: '16:9', rw: 16, rh: 9, size: [1024, 576] },
+] as const;
+
+const roundTo = (value: number, step: number) => Math.max(step, Math.round(value / step) * step);
+
+function buildSizes(defW: number, defH: number, step: number, min: number, max: number) {
+  const area = defW * defH;
+  const scale = area > 0 && area < 700_000;
+  const clamp = (v: number) => Math.min(max, Math.max(min, v));
+  return RATIOS.map((ratio) => {
+    let [w, h]: number[] = [...ratio.size];
+    if (scale) {
+      h = Math.sqrt(area * ratio.rh / ratio.rw);
+      w = h * ratio.rw / ratio.rh;
+      w = roundTo(w, step);
+      h = roundTo(h, step);
+    }
+    return { ...ratio, w: clamp(w), h: clamp(h) };
+  });
+}
 
 export function CreatePanel({
-  projectId,
-  models,
-  workflows,
-  presets,
-  settings,
-  manifest,
-  params,
-  setParams,
-  gallery,
-  selectedAssets,
-  setSelectedAssets,
-  uploadProgress,
-  onUpload,
-  modelId,
-  setModelId,
-  workflowId,
-  setWorkflowId,
-  runtime,
-  setRuntime,
-  maxRuntime,
-  setMaxRuntime,
-  batchCount,
-  setBatchCount,
-  batchMode,
-  setBatchMode,
-  loading,
-  error,
-  onSubmit,
-  onApplyPreset,
-  onSavePreset,
+  projectId, models, workflows, presets, settings, manifest, params, setParams, gallery,
+  selectedAssets, setSelectedAssets, uploadProgress, onUpload, setModelId, workflowId, setWorkflowId,
+  runtime, setRuntime, maxRuntime, setMaxRuntime, batchCount, setBatchCount, batchMode, setBatchMode,
+  loading, error, onSubmit, onApplyPreset, onSavePreset,
 }: {
   projectId: string;
   models: GpuModel[];
@@ -80,494 +81,326 @@ export function CreatePanel({
   onApplyPreset: (preset: GpuPreset) => void;
   onSavePreset: (name: string) => void;
 }) {
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [customSize, setCustomSize] = useState(false);
   const [presetName, setPresetName] = useState('');
-  const [showPresetSave, setShowPresetSave] = useState(false);
 
-  // 1. 工作流家族整理
-  const workflowFamilies = useMemo(() => {
-    const map = new Map<string, { modelId: string; items: GpuWorkflow[]; modality: string; title: string }>();
+  /* ───── 工作流分组：同一个 workflow_key 的所有版本归为一族 ───── */
+  const families = useMemo(() => {
+    const map = new Map<string, { key: string; modelId: string; items: GpuWorkflow[]; category: Category }>();
     workflows.forEach((wf) => {
-      const list = map.get(wf.workflow_key)?.items || [];
-      list.push(wf);
-      list.sort((a, b) => String(b.workflow_version).localeCompare(String(a.workflow_version), undefined, { numeric: true }));
-
-      const isVideo = wf.workflow_key.includes('i2v') || wf.workflow_key.includes('video') || wf.workflow_key.includes('ref2v');
-      const modality = isVideo ? 'video' : 'image';
-      const model = models.find((m) => m.model_id === wf.model_id);
-      const title = model?.display_name || wf.workflow_key;
-
-      map.set(wf.workflow_key, { modelId: wf.model_id, items: list, modality, title });
+      const fam = map.get(wf.workflow_key) || { key: wf.workflow_key, modelId: wf.model_id, items: [], category: isVideoKey(wf.workflow_key) ? 'video' as Category : 'image' as Category };
+      fam.items.push(wf);
+      map.set(wf.workflow_key, fam);
     });
-    return [...map.entries()];
-  }, [workflows, models]);
+    map.forEach((fam) => fam.items.sort((a, b) => String(b.workflow_version).localeCompare(String(a.workflow_version), undefined, { numeric: true })));
+    return [...map.values()];
+  }, [workflows]);
 
-  // 当前选中的活跃工作流
   const activeWorkflow = workflows.find((item) => item.id === workflowId);
+  const currentFamily = activeWorkflow ? families.find((f) => f.key === activeWorkflow.workflow_key) : undefined;
+  const category: Category = currentFamily?.category || 'image';
+  const modelName = (id?: string) => models.find((m) => m.model_id === id)?.display_name || id || '';
+  const pickable = (fam: typeof families[number]) => fam.items.some((i) => i.state === 'published') ? fam.items.filter((i) => i.state === 'published') : fam.items;
 
-  // 创作分类判定
-  const currentCategory: TaskCategory = useMemo(() => {
-    if (!activeWorkflow) return 'image';
-    const key = activeWorkflow.workflow_key.toLowerCase();
-    return key.includes('i2v') || key.includes('video') || key.includes('ref2v') ? 'video' : 'image';
-  }, [activeWorkflow]);
-
-  const filteredFamilies = useMemo(() => {
-    return workflowFamilies.filter(([, fam]) => fam.modality === currentCategory);
-  }, [workflowFamilies, currentCategory]);
-
-  function switchCategory(cat: TaskCategory) {
-    if (cat === currentCategory) return;
-    const candidates = workflowFamilies.filter(([, fam]) => fam.modality === cat);
-    if (candidates.length > 0) {
-      const targetFam = candidates[0][1];
-      const targetWf = targetFam.items.find((i) => i.active) || targetFam.items[0];
-      if (targetWf) {
-        setModelId(targetWf.model_id);
-        setWorkflowId(targetWf.id);
-      }
-    }
+  function chooseWorkflow(wf: GpuWorkflow) {
+    setModelId(wf.model_id);
+    setWorkflowId(wf.id);
+  }
+  function chooseFamily(fam: typeof families[number]) {
+    const list = pickable(fam);
+    const target = list.find((i) => i.active) || list[0];
+    if (target) chooseWorkflow(target);
+  }
+  function switchCategory(next: Category) {
+    if (next === category) return;
+    const fam = families.find((f) => f.category === next);
+    if (fam) chooseFamily(fam);
   }
 
-  const currentFamily = activeWorkflow ? workflowFamilies.find(([k]) => k === activeWorkflow.workflow_key)?.[1] : null;
-  const currentModel = models.find((m) => m.model_id === currentFamily?.modelId);
+  const subtitle = activeWorkflow
+    ? String(activeWorkflow.description || activeWorkflow.manifest?.description || manifest?.description || modelName(activeWorkflow.model_id))
+    : '';
 
-  // 画面尺寸状态与联动
-  const hasWidth = Boolean(manifest?.parameters && ('width' in manifest.parameters || (Array.isArray(manifest.parameters) && manifest.parameters.some(p => p.key === 'width'))));
-  const hasHeight = Boolean(manifest?.parameters && ('height' in manifest.parameters || (Array.isArray(manifest.parameters) && manifest.parameters.some(p => p.key === 'height'))));
-  const hasDimensionPair = hasWidth && hasHeight;
+  /* ───── 提示词、尺寸 ───── */
+  const plist = useMemo(() => parameterList(manifest), [manifest]);
+  const keys = useMemo(() => plist.map((p, i) => parameterKey(p, i)), [plist]);
+  const promptKey = keys.find((k) => k === 'prompt') || keys.find((k) => /prompt|caption/i.test(k) && !/negative/i.test(k)) || 'prompt';
+  const hasSize = keys.includes('width') && keys.includes('height');
+  const wParam = plist.find((p, i) => parameterKey(p, i) === 'width');
+  const hParam = plist.find((p, i) => parameterKey(p, i) === 'height');
+  const step = Number(wParam?.step) > 1 ? Number(wParam?.step) : 16;
+  const minSide = Math.max(Number(wParam?.min) || 0, Number(hParam?.min) || 0, 256);
+  const maxSide = Math.min(Number(wParam?.max) || 2048, Number(hParam?.max) || 2048);
+  const sizes = useMemo(
+    () => buildSizes(Number(wParam?.default) || 0, Number(hParam?.default) || 0, step, minSide, maxSide),
+    [wParam, hParam, step, minSide, maxSide],
+  );
+  const curW = Number(params.width) || 0;
+  const curH = Number(params.height) || 0;
+  const matched = sizes.find((s) => s.w === curW && s.h === curH);
+  const showCustom = customSize || !matched;
 
-  const currentW = Number(params.width) || 992;
-  const currentH = Number(params.height) || 992;
-  const matchedRatio = RATIO_PRESETS.find((p) => p.w === currentW && p.h === currentH);
-  const [selectedRatio, setSelectedRatio] = useState<string>(matchedRatio ? matchedRatio.label : 'custom');
+  // 换工作流后重新判断是否为自定义尺寸
+  useEffect(() => { setCustomSize(false); }, [workflowId]);
 
-  useEffect(() => {
-    const match = RATIO_PRESETS.find((p) => p.w === currentW && p.h === currentH);
-    if (match) setSelectedRatio(match.label);
-    else setSelectedRatio('custom');
-  }, [currentW, currentH]);
-
-  function applyRatio(preset: (typeof RATIO_PRESETS)[number]) {
-    setSelectedRatio(preset.label);
-    setParams({ ...params, width: preset.w, height: preset.h });
-  }
-
-  // 提示词键位
-  const promptKey = manifest?.parameters
-    ? ('prompt' in manifest.parameters ? 'prompt' : 'caption' in manifest.parameters ? 'caption' : 'prompt')
-    : 'prompt';
-
+  const excluded = useMemo(() => [promptKey, ...(hasSize ? ['width', 'height'] : [])], [promptKey, hasSize]);
+  const split = useMemo(() => splitParams(manifest, excluded), [manifest, excluded]);
   const promptValue = String(params[promptKey] ?? '');
-
-  const maxMinutesCap = typeof settings?.budget?.max_runtime_minutes === 'number'
-    ? settings.budget.max_runtime_minutes
-    : 60;
+  const maxMinutesCap = typeof settings?.budget?.max_runtime_minutes === 'number' ? settings.budget.max_runtime_minutes : 60;
+  const strategy = STRATEGIES.find((s) => s.value === batchMode) || STRATEGIES[0];
+  const patch = (next: Record<string, unknown>) => setParams({ ...params, ...next });
 
   if (!projectId) {
     return (
       <div className="empty">
-        <strong>请先在顶栏选择或新建项目</strong>
-        <span>项目用于归档参数预设、输入素材和输出作品。</span>
+        <strong>请先选择或新建项目</strong>
+        <span>点右上角的项目名称，项目用来归档你的参数预设、素材和作品。</span>
       </div>
     );
   }
 
   return (
     <div className={styles.stack}>
-      {/* 1. 创作类型卡片 */}
-      <section className={styles.card}>
-        <div className={styles.cardHead}>
-          <h2>✦ 创作类型</h2>
-        </div>
-        <div className={styles.categoryTabs}>
-          <button
-            type="button"
-            className={currentCategory === 'image' ? styles.categoryTabActive : styles.categoryTab}
-            onClick={() => switchCategory('image')}
-          >
-            <span>🖼</span>
-            <span>图片生成</span>
+      {/* 1 创作类型 */}
+      <Card icon={<Sparkles size={17} strokeWidth={1.6} aria-hidden />} title="创作类型">
+        <Segmented<Category>
+          ariaLabel="创作类型"
+          value={category}
+          onChange={switchCategory}
+          options={[
+            { value: 'image', label: '图片生成', icon: <ImageIcon size={17} strokeWidth={1.6} aria-hidden />, disabled: !families.some((f) => f.category === 'image') },
+            { value: 'video', label: '视频生成', icon: <Film size={17} strokeWidth={1.6} aria-hidden />, disabled: !families.some((f) => f.category === 'video') },
+          ]}
+        />
+      </Card>
+
+      {/* 2 工作流 */}
+      <Card
+        icon={<Layers size={17} strokeWidth={1.6} aria-hidden />}
+        title="工作流"
+        aside={<button type="button" className={styles.linkButton} onClick={() => setPickerOpen(true)}>切换<ChevronRight size={15} strokeWidth={1.6} aria-hidden /></button>}
+      >
+        {activeWorkflow ? (
+          <button type="button" className={styles.wfCard} onClick={() => setPickerOpen(true)} aria-label="切换工作流">
+            <span className={styles.wfThumb}><Layers size={20} strokeWidth={1.4} aria-hidden /></span>
+            <span className={styles.wfBody}>
+              <span className={styles.wfName}>
+                <strong>{activeWorkflow.workflow_key}</strong>
+                <span className="pill">v{activeWorkflow.workflow_version}</span>
+              </span>
+              <small className="muted">{subtitle}</small>
+            </span>
           </button>
-          <button
-            type="button"
-            className={currentCategory === 'video' ? styles.categoryTabActive : styles.categoryTab}
-            onClick={() => switchCategory('video')}
-          >
-            <span>🎬</span>
-            <span>视频生成</span>
-          </button>
-        </div>
-      </section>
-
-      {/* 2. 选用工作流卡片 */}
-      <section className={styles.card}>
-        <div className={styles.cardHead}>
-          <h2>⬡ 工作流</h2>
-          {/* 预设管理下拉 */}
-          <details style={{ position: 'relative' }}>
-            <summary className="pill" style={{ cursor: 'pointer', userSelect: 'none' }}>
-              预设管理 ▾
-            </summary>
-            <div className={styles.presetDropdown}>
-              <div className="field" style={{ margin: 0 }}>
-                <label>套用预设</label>
-                <select
-                  defaultValue=""
-                  onChange={(e) => {
-                    const preset = presets.find((p) => p.id === e.target.value);
-                    if (preset) onApplyPreset(preset);
-                  }}
-                >
-                  <option value="">选择已有预设…</option>
-                  {presets
-                    .filter((p) => p.workflow_version_id === workflowId)
-                    .map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name}
-                      </option>
-                    ))}
-                </select>
-              </div>
-
-              <div style={{ borderTop: '1px solid var(--line)', paddingTop: '8px' }}>
-                {!showPresetSave ? (
-                  <button
-                    className="button secondary"
-                    style={{ width: '100%', minHeight: '34px' }}
-                    type="button"
-                    onClick={() => setShowPresetSave(true)}
-                  >
-                    + 存为新预设
-                  </button>
-                ) : (
-                  <div style={{ display: 'grid', gap: '8px' }}>
-                    <input
-                      className="fieldInput"
-                      style={{ minHeight: '34px' }}
-                      placeholder="预设名称"
-                      value={presetName}
-                      onChange={(e) => setPresetName(e.target.value)}
-                    />
-                    <div className="actions">
-                      <button
-                        className="button"
-                        style={{ flex: 1, minHeight: '32px' }}
-                        type="button"
-                        disabled={!presetName.trim()}
-                        onClick={() => {
-                          onSavePreset(presetName.trim());
-                          setPresetName('');
-                          setShowPresetSave(false);
-                        }}
-                      >
-                        保存
-                      </button>
-                      <button
-                        className="button secondary"
-                        style={{ minHeight: '32px' }}
-                        type="button"
-                        onClick={() => setShowPresetSave(false)}
-                      >
-                        取消
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          </details>
-        </div>
-
-        {/* 内嵌紧凑工作流展示与切换 */}
-        <div className={styles.workflowSelectorBlock}>
-          <div className="field" style={{ margin: 0, flex: 1 }}>
-            <label htmlFor="workflow-family-select">选择具体流程</label>
-            <select
-              id="workflow-family-select"
-              aria-label="选用工作流"
-              value={activeWorkflow?.workflow_key || ''}
-              onChange={(e) => {
-                const targetFam = workflowFamilies.find(([k]) => k === e.target.value)?.[1];
-                if (targetFam) {
-                  const targetWf = targetFam.items.find((i) => i.active) || targetFam.items[0];
-                  if (targetWf) {
-                    setModelId(targetWf.model_id);
-                    setWorkflowId(targetWf.id);
-                  }
-                }
-              }}
-            >
-              {filteredFamilies.map(([key, fam]) => (
-                <option key={key} value={key}>
-                  {fam.title} ({key})
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {currentFamily && currentFamily.items.length > 1 && (
-            <div className="field" style={{ margin: 0, width: '110px' }}>
-              <label htmlFor="workflow-version-select">版本</label>
-              <select
-                id="workflow-version-select"
-                aria-label="切换版本"
-                value={workflowId}
-                onChange={(e) => {
-                  const target = currentFamily.items.find((i) => i.id === e.target.value);
-                  if (target) {
-                    setModelId(target.model_id);
-                    setWorkflowId(target.id);
-                  }
-                }}
-              >
-                {currentFamily.items.map((i) => (
-                  <option key={i.id} value={i.id}>
-                    v{i.workflow_version} {i.active ? '· 活跃' : ''}
-                  </option>
-                ))}
+        ) : <p className="muted small">还没有可用的工作流，请先到「设置 › 工作流与模型」发布一个。</p>}
+        <details className={`foldable ${styles.presetBox}`}>
+          <summary>参数预设{presets.filter((p) => p.workflow_version_id === workflowId).length ? `（${presets.filter((p) => p.workflow_version_id === workflowId).length}）` : ''}</summary>
+          <div className="foldContent">
+            <div className="field">
+              <label htmlFor="preset-select">套用已存的参数</label>
+              <select id="preset-select" defaultValue="" onChange={(e) => {
+                const preset = presets.find((p) => p.id === e.target.value);
+                if (preset) onApplyPreset(preset);
+              }}>
+                <option value="">选择预设…</option>
+                {presets.filter((p) => p.workflow_version_id === workflowId).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
             </div>
-          )}
-        </div>
-
-        {activeWorkflow && (
-          <div className={styles.workflowSummaryLine}>
-            <span className={styles.wfMetaBadge}>底座：{currentModel?.display_name || activeWorkflow.model_id}</span>
-            <span className={styles.wfMetaBadge}>版本：v{activeWorkflow.workflow_version}</span>
-            {currentCategory === 'video' && <span className={styles.wfMetaBadge}>耗显存任务</span>}
+            <div className={styles.inlineForm}>
+              <input aria-label="新预设名称" placeholder="给当前参数起个名字" value={presetName} onChange={(e) => setPresetName(e.target.value)} />
+              <button className="button secondary" type="button" disabled={!presetName.trim() || !workflowId} onClick={() => { onSavePreset(presetName.trim()); setPresetName(''); }}>保存</button>
+            </div>
           </div>
-        )}
-      </section>
+        </details>
+      </Card>
 
-      {/* 3. 提示词卡片 */}
-      <section className={styles.card}>
-        <div className={styles.cardHead}>
-          <h2>✎ 提示词</h2>
-        </div>
-        <div className="field" style={{ margin: 0 }}>
-          <textarea
-            aria-label="提示词"
-            value={promptValue}
-            placeholder="描述你想创作的画面、风格、主体与细节……"
-            rows={3}
-            onChange={(e) => setParams({ ...params, [promptKey]: e.target.value })}
-          />
-        </div>
-      </section>
+      {/* 3 提示词 */}
+      <Card icon={<Pencil size={17} strokeWidth={1.6} aria-hidden />} title="提示词">
+        <textarea
+          aria-label="提示词"
+          value={promptValue}
+          placeholder="描述想要的画面：主体、风格、光线、细节……"
+          rows={3}
+          onChange={(e) => setParams({ ...params, [promptKey]: e.target.value })}
+        />
+      </Card>
 
-      {/* 4. 基础参数卡片 (尺寸、数量) */}
-      <section className={styles.card}>
-        <div className={styles.cardHead}>
-          <h2>🎛 基础参数</h2>
-          {currentCategory === 'image' && (
-            <span className={styles.sizeDisplayBadge}>
-              {currentW} × {currentH} px
-            </span>
-          )}
-        </div>
-
-        {/* 画面比例快捷胶囊 (图片生成模式下始终呈现) */}
-        {currentCategory === 'image' && (
-          <div className={styles.ratioChips} style={{ marginBottom: '10px' }}>
-            {RATIO_PRESETS.map((p) => {
-              const active = selectedRatio === p.label;
+      {/* 4 画面尺寸 —— 全页只有这一套尺寸选择 */}
+      {hasSize && (
+        <Card
+          icon={<SlidersHorizontal size={17} strokeWidth={1.6} aria-hidden />}
+          title="画面尺寸"
+          aside={<span className={styles.sizeBadge}>{curW || '—'} × {curH || '—'}</span>}
+        >
+          <div className={styles.ratioGrid} role="group" aria-label="画幅比例">
+            {sizes.map((s) => {
+              const on = !showCustom && matched?.label === s.label;
+              const box = 22;
+              const bw = s.rw >= s.rh ? box : Math.round(box * s.rw / s.rh);
+              const bh = s.rh >= s.rw ? box : Math.round(box * s.rh / s.rw);
               return (
-                <button
-                  key={p.label}
-                  type="button"
-                  className={active ? styles.ratioChipActive : styles.ratioChip}
-                  onClick={() => applyRatio(p)}
-                >
-                  <strong>{p.label}</strong>
-                  <span>{p.w}×{p.h}</span>
+                <button key={s.label} type="button" className={styles.ratioChip} data-active={on} aria-pressed={on}
+                  onClick={() => { setCustomSize(false); patch({ width: s.w, height: s.h }); }}>
+                  <span className={styles.ratioShape} aria-hidden><i style={{ width: bw, height: bh }} /></span>
+                  <strong>{s.label}</strong>
+                  <small>{s.w}×{s.h}</small>
                 </button>
               );
             })}
-            <button
-              type="button"
-              className={selectedRatio === 'custom' ? styles.ratioChipActive : styles.ratioChip}
-              onClick={() => setSelectedRatio('custom')}
-            >
+            <button type="button" className={styles.ratioChip} data-active={showCustom} aria-pressed={showCustom} onClick={() => setCustomSize(true)}>
+              <span className={styles.ratioShape} aria-hidden><i className={styles.ratioDashed} style={{ width: 22, height: 16 }} /></span>
               <strong>自定义</strong>
-              <span>微调</span>
+              <small>手动输入</small>
             </button>
           </div>
-        )}
-
-        {/* 并排输入行：宽、高、生成数量 */}
-        <div style={{ display: 'grid', gridTemplateColumns: currentCategory === 'image' ? '1fr 1fr 1fr' : '1fr', gap: '8px', alignItems: 'end' }}>
-          {currentCategory === 'image' && (
-            <div className="field" style={{ margin: 0 }}>
-              <label>宽</label>
-              <input
-                type="number"
-                min={256}
-                max={2048}
-                step={16}
-                value={String(params.width ?? 992)}
-                onChange={(e) => {
-                  setSelectedRatio('custom');
-                  setParams({ ...params, width: Number(e.target.value) || 0 });
-                }}
-              />
+          {showCustom && (
+            <div className={styles.customSize}>
+              <label className={styles.sizeInput}>
+                <span>宽</span>
+                <input type="number" inputMode="numeric" min={minSide} max={maxSide} step={step} value={String(params.width ?? '')}
+                  onChange={(e) => patch({ width: Number(e.target.value) || 0 })} />
+                <em>px</em>
+              </label>
+              <span className="muted">×</span>
+              <label className={styles.sizeInput}>
+                <span>高</span>
+                <input type="number" inputMode="numeric" min={minSide} max={maxSide} step={step} value={String(params.height ?? '')}
+                  onChange={(e) => patch({ height: Number(e.target.value) || 0 })} />
+                <em>px</em>
+              </label>
             </div>
           )}
-
-          {currentCategory === 'image' && (
-            <div className="field" style={{ margin: 0 }}>
-              <label>高</label>
-              <input
-                type="number"
-                min={256}
-                max={2048}
-                step={16}
-                value={String(params.height ?? 992)}
-                onChange={(e) => {
-                  setSelectedRatio('custom');
-                  setParams({ ...params, height: Number(e.target.value) || 0 });
-                }}
-              />
-            </div>
-          )}
-
-          <div className="field" style={{ margin: 0 }}>
-            <label>生成数量</label>
-            <div className={styles.stepperControl}>
-              <button
-                type="button"
-                onClick={() => setBatchCount(Math.max(1, batchCount - 1))}
-              >
-                -
-              </button>
-              <input
-                aria-label="生成数量"
-                type="number"
-                min={1}
-                max={100}
-                value={batchCount}
-                onChange={(e) => setBatchCount(Math.max(1, Math.min(100, Number(e.target.value) || 1)))}
-              />
-              <button
-                type="button"
-                onClick={() => setBatchCount(Math.min(100, batchCount + 1))}
-              >
-                +
-              </button>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* 5. 高级参数 / LoRA / 负向提示词 (折叠手风琴) */}
-      {manifest && (
-        <section className={styles.card}>
-          <div className={styles.cardHead}>
-            <h2>⚙ 详细参数与素材</h2>
-          </div>
-
-          <GpuParamForm
-            manifest={manifest}
-            values={params}
-            assets={gallery}
-            uploadProgress={uploadProgress}
-            onChange={(k, v) => setParams({ ...params, [k]: v })}
-            onUpload={onUpload}
-            excludeKeys={hasDimensionPair ? [promptKey, 'width', 'height'] : [promptKey]}
-          />
-
-          {supportsReferences(manifest) && (
-            <div style={{ marginTop: '12px' }}>
-              <ReferencePicker
-                manifest={manifest}
-                assets={gallery}
-                selected={selectedAssets}
-                onChange={setSelectedAssets}
-                onUpload={onUpload}
-              />
-            </div>
-          )}
-        </section>
+          {showCustom && <p className="muted small">建议取 {step} 的倍数，范围 {minSide}–{maxSide}。尺寸越大越慢、越费 CU。</p>}
+        </Card>
       )}
 
-      {/* 6. 运行设置卡片 (必须在立即生成之前！) */}
-      <section className={styles.card}>
-        <div className={styles.cardHead}>
-          <h2>▶ 运行设置</h2>
-          <span className="pill">{runtime === 'colab' ? '真实 GPU' : 'Mock 模拟'}</span>
-        </div>
+      {/* 5 常用选项（时长 / 模式）直接展示 */}
+      {split.options.length > 0 && (
+        <Card icon={<SlidersHorizontal size={17} strokeWidth={1.6} aria-hidden />} title="生成选项">
+          <GpuParamForm section="options" manifest={manifest} values={params} assets={gallery} uploadProgress={uploadProgress}
+            onChange={(k, v) => setParams({ ...params, [k]: v })} onUpload={onUpload} excludeKeys={excluded} />
+        </Card>
+      )}
 
-        {/* 运行环境切换双大按钮 */}
-        <div className={styles.segmentedControl}>
-          <button
-            type="button"
-            className={runtime === 'mock' ? styles.segmentedActive : styles.segmentedItem}
-            onClick={() => setRuntime('mock')}
-          >
-            离线模拟 (Mock)
-          </button>
-          <button
-            type="button"
-            className={runtime === 'colab' ? styles.segmentedActive : styles.segmentedItem}
-            disabled={!settings?.real_enabled}
-            onClick={() => setRuntime('colab')}
-          >
-            Colab GPU {settings?.real_enabled ? '' : '（未启用）'}
-          </button>
-        </div>
+      {/* 6 素材 */}
+      {manifest && (split.assets.length > 0 || supportsReferences(manifest)) && (
+        <Card icon={<ImageIcon size={17} strokeWidth={1.6} aria-hidden />} title="参考素材">
+          <GpuParamForm section="assets" manifest={manifest} values={params} assets={gallery} uploadProgress={uploadProgress}
+            onChange={(k, v) => setParams({ ...params, [k]: v })} onUpload={onUpload} excludeKeys={excluded} />
+          <ReferencePicker manifest={manifest} assets={gallery} selected={selectedAssets} onChange={setSelectedAssets} onUpload={onUpload} />
+        </Card>
+      )}
 
-        {/* 运行策略下拉 */}
-        <div className="field" style={{ marginTop: '12px' }}>
-          <label htmlFor="batch-mode-select">运行策略</label>
-          <select
-            id="batch-mode-select"
-            aria-label="运行策略"
-            value={batchMode}
-            onChange={(e) => setBatchMode(e.target.value as 'save' | 'smart' | 'batch')}
-          >
-            <option value="save">节省模式 · 队列结束即释放运行时</option>
-            <option value="batch">批次复用 · 兼容同批任务串行复用</option>
-            <option value="smart">智能模式 · 短暂保留 120s 空闲待命</option>
+      {/* 7 数量 */}
+      <Card>
+        <div className={styles.countRow}>
+          <div>
+            <strong>生成数量</strong>
+            <p className="muted small">一次提交几张/几段，多个会按顺序排队。</p>
+          </div>
+          <div className={styles.stepper}>
+            <button type="button" aria-label="减少数量" disabled={batchCount <= 1} onClick={() => setBatchCount(Math.max(1, batchCount - 1))}><Minus size={16} strokeWidth={1.8} aria-hidden /></button>
+            <input aria-label="生成数量" type="number" inputMode="numeric" min={1} max={100} value={batchCount}
+              onChange={(e) => setBatchCount(Math.max(1, Math.min(100, Number(e.target.value) || 1)))} />
+            <button type="button" aria-label="增加数量" disabled={batchCount >= 100} onClick={() => setBatchCount(Math.min(100, batchCount + 1))}><Plus size={16} strokeWidth={1.8} aria-hidden /></button>
+          </div>
+        </div>
+      </Card>
+
+      {/* 8 高级参数：默认折叠 */}
+      {split.advanced.length > 0 && (
+        <details className={`foldable ${styles.advanced}`}>
+          <summary>
+            <span className={styles.advTitle}><SlidersHorizontal size={17} strokeWidth={1.6} aria-hidden />高级参数<span className="pill">{split.advanced.length} 项</span></span>
+          </summary>
+          <div className="foldContent">
+            <p className="muted small">一般不用改。不确定时保持默认即可。</p>
+            <GpuParamForm section="advanced" manifest={manifest} values={params} assets={gallery} uploadProgress={uploadProgress}
+              onChange={(k, v) => setParams({ ...params, [k]: v })} onUpload={onUpload} excludeKeys={excluded} />
+          </div>
+        </details>
+      )}
+
+      {/* 9 运行设置 */}
+      <Card
+        icon={<Play size={17} strokeWidth={1.6} aria-hidden />}
+        title="运行设置"
+        aside={<InfoTip label="运行方式说明" text={<><span className={styles.tipLine}><b>离线模拟</b>：{RUNTIME_HELP.mock}</span><span className={styles.tipLine}><b>Colab GPU</b>：{RUNTIME_HELP.colab}</span></>} />}
+      >
+        <Segmented<Provider>
+          ariaLabel="运行方式"
+          value={runtime}
+          onChange={setRuntime}
+          options={[
+            { value: 'mock', label: '离线模拟', sub: '不扣 CU', icon: <Monitor size={17} strokeWidth={1.6} aria-hidden /> },
+            { value: 'colab', label: 'Colab GPU', sub: settings?.real_enabled ? '真实出图' : '未启用', disabled: !settings?.real_enabled, icon: <Cloud size={17} strokeWidth={1.6} aria-hidden /> },
+          ]}
+        />
+        <div className="field">
+          <div className={styles.paramLabel}>
+            <label htmlFor="batch-mode-select">运行策略</label>
+            <InfoTip label="运行策略说明" text={<>{STRATEGIES.map((s) => <span key={s.value} className={styles.tipLine}><b>{s.name}</b>：{s.long}</span>)}</>} />
+          </div>
+          <select id="batch-mode-select" aria-label="运行策略" value={batchMode} onChange={(e) => setBatchMode(e.target.value as 'save' | 'smart' | 'batch')}>
+            {STRATEGIES.map((s) => <option key={s.value} value={s.value}>{s.name}：{s.short}</option>)}
           </select>
+          <span className={styles.hint}>{strategy.long}</span>
         </div>
-
         {runtime === 'colab' && (
-          <div className="field" style={{ marginTop: '8px' }}>
-            <label>单任务超时（分钟）</label>
-            <input
-              type="number"
-              min={5}
-              max={maxMinutesCap}
-              value={maxRuntime}
-              onChange={(e) => setMaxRuntime(Number(e.target.value))}
-            />
+          <div className="field">
+            <label htmlFor="max-runtime">单个任务最长运行（分钟）</label>
+            <input id="max-runtime" type="number" inputMode="numeric" min={5} max={maxMinutesCap} value={maxRuntime} onChange={(e) => setMaxRuntime(Number(e.target.value))} />
+            <span className={styles.hint}>超时会被强制关机，已花的 CU 不退。</span>
           </div>
         )}
-
-        <p className="muted" style={{ fontSize: '0.75rem', margin: '6px 0 16px', lineHeight: 1.5 }}>
-          {runtime === 'mock'
-            ? '✓ Mock 离线演示模式，零 CU 扣除。Seed ≥ 0 时多批次按序递增。'
-            : `Colab GPU 模式，日限额保护：${shown(settings?.budget?.daily_units)} CU。`}
+        <p className="muted small">
+          {runtime === 'mock' ? RUNTIME_HELP.mock : `${RUNTIME_HELP.colab}今日限额 ${shown(settings?.budget?.daily_units)} CU。`}
         </p>
-
-        {/* 7. 立即生成通栏主操作按钮 */}
-        <button
-          className="button"
-          style={{
-            width: '100%',
-            minHeight: '50px',
-            fontSize: '1.05rem',
-            fontWeight: 700,
-            letterSpacing: '0.02em',
-          }}
-          disabled={!workflowId || loading === 'submit'}
-          type="button"
-          onClick={onSubmit}
-        >
-          {loading === 'submit' ? '提交任务中…' : '✦ 立即生成'}
+        <button className="button big" disabled={!workflowId || loading === 'submit'} type="button" onClick={onSubmit}>
+          <Sparkles size={18} strokeWidth={1.8} aria-hidden />{loading === 'submit' ? '提交中…' : '立即生成'}
         </button>
-
         {error && <p className="status error" role="alert">{error}</p>}
-      </section>
+      </Card>
+
+      {/* 工作流选择面板 */}
+      {pickerOpen && (
+        <div className={styles.dialogBackdrop} role="presentation" onClick={() => setPickerOpen(false)}>
+          <section className={styles.dialog} role="dialog" aria-modal="true" aria-label="选择工作流" onClick={(e) => e.stopPropagation()}>
+            <div className={styles.cardHead}>
+              <h2>选择工作流</h2>
+              <button className={styles.iconGhost} type="button" aria-label="关闭" onClick={() => setPickerOpen(false)}><X size={18} strokeWidth={1.6} aria-hidden /></button>
+            </div>
+            <p className="muted small">同一个工作流的不同版本收在一起，点版本即可切换。{category === 'image' ? '当前显示图片类。' : '当前显示视频类。'}</p>
+            <div className={styles.pickList}>
+              {families.filter((f) => f.category === category).map((fam) => {
+                const list = pickable(fam);
+                const here = currentFamily?.key === fam.key;
+                return (
+                  <div key={fam.key} className={styles.pickItem} data-on={here}>
+                    <button type="button" className={styles.pickMain} onClick={() => { chooseFamily(fam); setPickerOpen(false); }}>
+                      <span>
+                        <strong>{fam.key}</strong>
+                        <small className="muted">{modelName(fam.modelId)}</small>
+                      </span>
+                      {here && <Check size={18} strokeWidth={1.8} aria-hidden />}
+                    </button>
+                    {list.length > 1 && (
+                      <div className={styles.versionRow} role="group" aria-label={`${fam.key} 的版本`}>
+                        {list.map((wf) => (
+                          <button key={wf.id} type="button" data-active={wf.id === workflowId} onClick={() => { chooseWorkflow(wf); setPickerOpen(false); }}>
+                            v{wf.workflow_version}{wf.active ? ' · 当前' : ''}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              {!families.some((f) => f.category === category) && <p className="muted small">这个类型下还没有工作流。</p>}
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   );
 }

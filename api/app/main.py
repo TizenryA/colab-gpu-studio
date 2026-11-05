@@ -680,9 +680,18 @@ def compute_specs(
         return ok(MockColabProvider().list_specs(), request)
     if provider != "colab":
         raise APIError("PROVIDER_INVALID", "不支持该 Provider")
+    if os.getenv("STUDIO_OFFLINE_TEST") == "1":
+        raise APIError("OFFLINE_MODE", "站点处于离线测试模式，不能连接 Colab。可改查模拟 GPU。", status=409)
+    if not GpuConfig.from_env().real_enabled:
+        raise APIError("REAL_GPU_DISABLED", "真实 GPU 未启用，不能连接 Colab。可改查模拟 GPU。", status=409)
     from .gpu.colab import GoogleColabProvider
 
-    return ok(GoogleColabProvider(Repository(st), user["id"]).list_specs(), request)
+    try:
+        return ok(GoogleColabProvider(Repository(st), user["id"]).list_specs(), request)
+    except APIError:
+        raise
+    except Exception as exc:
+        raise APIError("COLAB_CHECK_FAILED", f"检查 Colab GPU 失败：{str(exc)[:160]}", status=502, retryable=True) from exc
 
 
 @router.get("/compute/subscription")

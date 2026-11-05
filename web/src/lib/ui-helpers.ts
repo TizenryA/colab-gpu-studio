@@ -81,7 +81,7 @@ export function readableState(value?: string) {
 }
 
 export function workflowState(value?: string, active?: boolean) {
-  return active ? '当前活跃版本' : ({ draft: '草稿', validated: '已校验', published: '已发布' }[value || ''] || value || '未知');
+  return active ? '当前使用' : ({ draft: '草稿', validated: '已校验，待发布', published: '已发布' }[value || ''] || value || '未知');
 }
 
 export function progressPercent(value?: number) {
@@ -90,4 +90,18 @@ export function progressPercent(value?: number) {
 
 export function assetIdsFromParams(params: Record<string, unknown>, validIds: Set<string>) {
   return Object.values(params).filter((value): value is string => typeof value === 'string' && validIds.has(value));
+}
+
+/** 数字转 “0.00”，不是数字时给 “—”。 */
+export function cuNumber(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '—';
+  const num = Number(value);
+  return Number.isFinite(num) ? num.toFixed(2) : '—';
+}
+
+export function jobSize(job: { params?: Record<string, unknown>; resolved_params?: Record<string, unknown> }): string {
+  const source = job.resolved_params || job.params || {};
+  const w = Number(source.width);
+  const h = Number(source.height);
+  return w > 0 && h > 0 ? `${w} × ${h}` : '';
 }

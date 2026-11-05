@@ -1,7 +1,7 @@
 {
   "name": "colab-gpu-studio-web",
   "private": true,
-  "version": "0.1.31-dev.3",
+  "version": "0.1.31-dev.8",
   "type": "module",
   "scripts": {
     "dev": "vite",

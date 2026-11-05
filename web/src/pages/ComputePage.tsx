@@ -1,15 +1,16 @@
 import { useState } from 'react';
-import type { GpuSettings, GpuUsage } from '../lib/gpu-api';
+import { Cpu, Layers, Monitor, Cloud, HardDrive, Leaf, Boxes, Sparkles, ChevronDown, Info, Square, Search } from 'lucide-react';
+import type { ComputeSpec, GpuSettings, GpuUsage } from '../lib/gpu-api';
+import { ComputeSpecs } from '../components/ComputeSpecs';
+import { Card } from '../components/ui';
+import { STRATEGIES } from '../lib/labels';
 import styles from '../gpu.module.css';
-import { formatCu, shown } from '../lib/ui-helpers';
+import { cuNumber, shown } from '../lib/ui-helpers';
+
+const STRATEGY_ICON = { save: Leaf, batch: Boxes, smart: Sparkles } as const;
 
 export function ComputePage({
-  settings,
-  usage,
-  onStop,
-  onCheck,
-  loadingStop,
-  loadingCheck,
+  settings, usage, onStop, onCheck, loadingStop, loadingCheck, specs = [], specsNote = '', error = '',
 }: {
   settings: GpuSettings | null;
   usage: GpuUsage | null;
@@ -17,191 +18,81 @@ export function ComputePage({
   onCheck?: () => void;
   loadingStop?: boolean;
   loadingCheck?: boolean;
+  specs?: ComputeSpec[];
+  specsNote?: string;
+  error?: string;
 }) {
-  const offline = settings?.offline_mode === true;
-  const isMock = offline || !settings?.real_enabled;
-  const realEnabled = Boolean(settings?.real_enabled);
+  const [open, setOpen] = useState<string>('');
+  const realEnabled = Boolean(settings?.real_enabled) && settings?.offline_mode !== true;
   const activeCount = Number(usage?.active_runtimes ?? 0);
+  const estimated = usage?.estimated_units;
+  const actual = usage?.actual_units;
+  const limit = usage?.daily_limit || settings?.budget?.daily_units;
 
   return (
     <div className={styles.stack}>
-      {/* 头部标题与说明 */}
-      <div className={styles.pageHeader}>
-        <h2>⚡ 算力工作台</h2>
-        <p className="muted" style={{ margin: '4px 0 0', fontSize: '0.8rem' }}>
-          任务在后台推进，手机关闭后仍可回来查看。
-        </p>
+      <div className={styles.pageHead}>
+        <h2><Cpu size={20} strokeWidth={1.6} aria-hidden />算力</h2>
+        <p className="muted small">任务在后台运行，关掉手机也不会中断，回来再看就行。</p>
       </div>
 
-      {/* 1. 当前环境卡片 */}
-      <section className={styles.card}>
-        <div className={styles.cardHead}>
-          <div>
-            <h3 style={{ margin: 0, fontSize: '0.95rem', fontWeight: 700 }}>当前环境</h3>
-            <span className="muted" style={{ fontSize: '0.75rem' }}>
-              {isMock ? '本地 Mock Provider' : 'Google Colab GPU Provider'}
-            </span>
-          </div>
-          <span
-            className="pill"
-            style={{
-              background: realEnabled ? 'var(--accent-soft)' : 'var(--panel-strong)',
-              color: realEnabled ? 'var(--accent)' : 'var(--text-secondary)',
-              borderColor: realEnabled ? 'var(--accent)' : 'var(--line)',
-            }}
-          >
-            {realEnabled ? '真实 GPU' : '模拟模式'}
-          </span>
+      <Card icon={<Monitor size={17} strokeWidth={1.6} aria-hidden />} title="当前环境" aside={<span className={`pill ${realEnabled ? 'solid' : ''}`}>{realEnabled ? '真实 GPU' : '模拟模式'}</span>}>
+        <p className="muted small">{realEnabled ? '任务会在 Google Colab 的 GPU 上真实运行。' : '现在是本地模拟，不会连接 Colab，也不会扣 CU。'}</p>
+        <div className={styles.triple}>
+          <div><small className="muted">真实 GPU</small><strong>{realEnabled ? '已启用' : '未启用'}</strong></div>
+          <div><small className="muted">在线机器</small><strong>{activeCount}</strong></div>
+          <div><small className="muted">文件存放</small><strong>{settings?.storage === 'drive' ? 'Google 云盘' : '本站服务器'}</strong></div>
         </div>
+      </Card>
 
-        {/* 三列关键指标（带分割线） */}
-        <div className={styles.computeEnvColumns}>
-          <div className={styles.envCol}>
-            <span className={styles.envColLabel}>真实 GPU</span>
-            <span className={styles.envColBadge} data-enabled={realEnabled}>
-              {realEnabled ? '已启用' : '未启用'}
-            </span>
-          </div>
-
-          <div className={styles.envDivider} />
-
-          <div className={styles.envCol}>
-            <span className={styles.envColLabel}>活跃运行时</span>
-            <strong className={styles.envColValue}>{activeCount}</strong>
-          </div>
-
-          <div className={styles.envDivider} />
-
-          <div className={styles.envCol}>
-            <span className={styles.envColLabel}>存储</span>
-            <strong className={styles.envColValue}>{settings?.storage || 'local'}</strong>
-          </div>
+      <Card icon={<HardDrive size={17} strokeWidth={1.6} aria-hidden />} title="CU 用量">
+        <div className={styles.grid2}>
+          <div className={styles.statBox}><small className="muted">今日预估</small><strong>{cuNumber(estimated)}<em> CU</em></strong>{!realEnabled && <small className="muted">模拟估算</small>}</div>
+          <div className={styles.statBox}><small className="muted">实际扣除</small><strong>{cuNumber(actual)}<em> CU</em></strong>{(actual === null || actual === undefined) && <small className="muted">暂无数据</small>}</div>
+          <div className={styles.statBox}><small className="muted">每日上限</small><strong>{shown(limit)}<em> CU</em></strong></div>
+          <div className={styles.statBox}><small className="muted">在线机器</small><strong>{activeCount}</strong></div>
         </div>
-      </section>
+        <p className="muted small">这里的数字是站内按用时估算的，不是 Google 账单。实际余额以 Colab 官网为准。</p>
+      </Card>
 
-      {/* 2. 算力统计卡片 (2×2 宫格) */}
-      <section className={styles.card}>
-        <div className={styles.cardHead}>
-          <h3 style={{ margin: 0, fontSize: '0.95rem', fontWeight: 700 }}>📊 算力统计</h3>
+      <Card icon={<Layers size={17} strokeWidth={1.6} aria-hidden />} title="运行策略">
+        <div className={styles.strategyList}>
+          {STRATEGIES.map((s) => {
+            const Icon = STRATEGY_ICON[s.value];
+            const isOpen = open === s.value;
+            return (
+              <div key={s.value} className={styles.strategy} data-open={isOpen}>
+                <button type="button" aria-expanded={isOpen} onClick={() => setOpen(isOpen ? '' : s.value)}>
+                  <Icon size={18} strokeWidth={1.5} aria-hidden />
+                  <span><strong>{s.name}</strong><small className="muted">{s.short}</small></span>
+                  <ChevronDown size={16} strokeWidth={1.6} aria-hidden className={styles.chev} />
+                </button>
+                {isOpen && <p className="muted small">{s.long}<br />在「创作 › 运行设置 › 运行策略」里选择。</p>}
+              </div>
+            );
+          })}
         </div>
+      </Card>
 
-        <div className={styles.statGrid2x2}>
-          <div className={styles.statItemBox}>
-            <div className={styles.statItemHead}>
-              <span>📅 今日估算</span>
-            </div>
-            <strong className={styles.statValueLarge}>
-              {formatCu((usage as Record<string, unknown> | null)?.estimated_units, isMock)}
-            </strong>
-          </div>
+      <div className={styles.note}><Info size={16} strokeWidth={1.6} aria-hidden /><span>{realEnabled ? '用量数据来自站内记录，可能与 Google 账单略有出入。' : '模拟模式的数据仅供演示，不代表真实账单。'}</span></div>
 
-          <div className={styles.statItemBox}>
-            <div className={styles.statItemHead}>
-              <span>⚡ 实际消耗</span>
-            </div>
-            <strong className={styles.statValueLarge}>
-              {formatCu((usage as Record<string, unknown> | null)?.actual_units, false)}
-            </strong>
-          </div>
-
-          <div className={styles.statItemBox}>
-            <div className={styles.statItemHead}>
-              <span>🛡 单日限额</span>
-            </div>
-            <strong className={styles.statValueLarge}>
-              {shown((usage as Record<string, unknown> | null)?.daily_limit || settings?.budget?.daily_units)} CU
-            </strong>
-          </div>
-
-          <div className={styles.statItemBox}>
-            <div className={styles.statItemHead}>
-              <span>▶ 活跃运行时</span>
-            </div>
-            <strong className={styles.statValueLarge}>
-              {activeCount}
-            </strong>
-          </div>
-        </div>
-      </section>
-
-      {/* 3. 运行策略列表卡片 (3 条策略项) */}
-      <section className={styles.card}>
-        <div className={styles.cardHead}>
-          <h3 style={{ margin: 0, fontSize: '0.95rem', fontWeight: 700 }}>🎛 运行策略</h3>
-        </div>
-
-        <div className={styles.strategyRows}>
-          <div className={styles.strategyRowItem}>
-            <div className={styles.strategyRowLeft}>
-              <span className={styles.strategyIcon}>🍃</span>
-              <strong>节省</strong>
-              <span className={styles.strategyRowDivider}>|</span>
-              <span className={styles.strategyRowDesc}>队列结束即释放</span>
-            </div>
-            <span className={styles.strategyChevron}>›</span>
-          </div>
-
-          <div className={styles.strategyRowItem}>
-            <div className={styles.strategyRowLeft}>
-              <span className={styles.strategyIcon}>🗂</span>
-              <strong>批次</strong>
-              <span className={styles.strategyRowDivider}>|</span>
-              <span className={styles.strategyRowDesc}>兼容任务串行复用</span>
-            </div>
-            <span className={styles.strategyChevron}>›</span>
-          </div>
-
-          <div className={styles.strategyRowItem}>
-            <div className={styles.strategyRowLeft}>
-              <span className={styles.strategyIcon}>✦</span>
-              <strong>智能</strong>
-              <span className={styles.strategyRowDivider}>|</span>
-              <span className={styles.strategyRowDesc}>短暂保留空闲，可能持续消耗 CU</span>
-            </div>
-            <span className={styles.strategyChevron}>›</span>
-          </div>
-        </div>
-      </section>
-
-      {/* 4. Mock 提示横条 */}
-      <div className={styles.mockNoticeBanner}>
-        <span style={{ fontSize: '0.9rem' }}>ℹ</span>
-        <span>Mock 数据仅供演示，不代表实际账单。未连接真实账单的费用为模拟估算。</span>
-      </div>
-
-      {/* 5. 底部主副操作按钮 (检查可用 GPU & 停止全部任务) */}
-      <div className={styles.computeActionRow}>
-        <button
-          className="button"
-          style={{ flex: 1, minHeight: '44px' }}
-          disabled={loadingCheck}
-          type="button"
-          onClick={onCheck}
-        >
-          {loadingCheck ? '检查中…' : '检查可用 GPU'}
+      <div className={styles.twoButtons}>
+        <button className="button" style={{ flex: 1 }} disabled={loadingCheck} type="button" onClick={onCheck}>
+          <Search size={16} strokeWidth={1.8} aria-hidden />{loadingCheck ? '检查中…' : '检查可用 GPU'}
         </button>
-
-        <button
-          className="button secondary"
-          style={{
-            flex: 1,
-            minHeight: '44px',
-            color: 'var(--danger)',
-            borderColor: 'rgba(248, 113, 113, 0.4)',
-          }}
-          disabled={loadingStop}
-          type="button"
-          onClick={onStop}
-        >
-          {loadingStop ? '停止中…' : '⏹ 停止全部任务'}
+        <button className="button danger" style={{ flex: 1 }} disabled={loadingStop} type="button" onClick={onStop}>
+          <Square size={14} strokeWidth={1.8} aria-hidden />{loadingStop ? '停止中…' : '停止全部任务'}
         </button>
       </div>
+      {specsNote && <p className="muted small" role="status">{specsNote}</p>}
+      {specs.length > 0 && <ComputeSpecs specs={specs} />}
+      {error && <p className="status error" role="alert">{error}</p>}
     </div>
   );
 }
 
 export function ThemePicker() {
-  const [theme, setTheme] = useState(() => localStorage.getItem('studio-theme') || 'system');
+  const [theme, setTheme] = useState(() => localStorage.getItem('studio-theme') || 'dark');
   function change(value: string) {
     setTheme(value);
     localStorage.setItem('studio-theme', value);
@@ -209,11 +100,11 @@ export function ThemePicker() {
   }
   return (
     <div className="field">
-      <label htmlFor="theme-select">界面外观主题</label>
+      <label htmlFor="theme-select">界面颜色</label>
       <select id="theme-select" value={theme} onChange={(e) => change(e.target.value)}>
-        <option value="system">跟随系统偏好</option>
-        <option value="dark">纯黑极客深色 (Dark)</option>
-        <option value="light">清爽专业浅色 (Light)</option>
+        <option value="dark">深色（黑底）</option>
+        <option value="light">浅色（白底）</option>
+        <option value="system">跟随手机系统</option>
       </select>
     </div>
   );

@@ -29,8 +29,11 @@ class MockWorkerSessions:
             else:
                 session = {'id': str(uuid.uuid4()), 'owner_id': owner, 'signature': signature,
                            'executions': [], 'active_execution': None, 'service_starts': 1,
-                           'mock': True}
+                           'restored_signature': None, 'restore_skipped': {}, 'mock': True}
                 cls._sessions[runtime] = session
+            # Like the real worker: the runtime remembers which environment it last restored.
+            session['restore_skipped'][execution] = session.get('restored_signature') == signature
+            session['restored_signature'] = signature
             session['executions'].append(execution)
             session['active_execution'] = execution
             return dict(session)

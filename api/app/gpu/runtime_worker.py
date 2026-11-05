@@ -340,6 +340,71 @@ def _remove(path: Path) -> None:
         path.unlink()
 
 
+WARM_VERSION = 1
+
+
+def _warm_fingerprint(commit: str, custom_nodes: list[dict], weights: list[dict]) -> str:
+    """What a restored ComfyUI tree must match for the next job on this runtime to reuse it as-is."""
+    body = {
+        "v": WARM_VERSION,
+        "commit": commit,
+        "python": f"{sys.version_info.major}.{sys.version_info.minor}",
+        "nodes": sorted(f"{n['repo']}@{n['commit']}" for n in custom_nodes),
+        "weights": sorted(
+            (w["target"], w["sha256"], w.get("size"), w.get("source", "huggingface")) for w in weights
+        ),
+    }
+    return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
+
+
+def _warm_take(root: Path, fingerprint: str, custom_nodes: list[dict], weights: list[dict]) -> bool:
+    """Move the previous job's restored ComfyUI tree into this job's root when it is the same environment.
+
+    The marker is dropped while the tree is in use, so a job that dies mid-run can never leave a
+    marker that points at a tree that has moved or half changed.
+    """
+    warm = root.parent / ".warm"
+    marker = warm / "state.json"
+    try:
+        state = json.loads(marker.read_text("utf-8"))
+    except (OSError, ValueError):
+        return False
+    tree = warm / "ComfyUI"
+    if not isinstance(state, dict) or state.get("fingerprint") != fingerprint or not tree.is_dir():
+        return False
+    models = tree / "models"
+    for item in weights:
+        path = models / item["target"]
+        if not path.is_file() or (item.get("size") and path.stat().st_size != item["size"]):
+            return False
+    for node in custom_nodes:
+        if not (tree / "custom_nodes" / node["dir"]).is_dir():
+            return False
+    marker.unlink(missing_ok=True)
+    shutil.rmtree(root / "ComfyUI", ignore_errors=True)
+    tree.rename(root / "ComfyUI")
+    # Per-job leftovers: reference images, previous outputs and the owner's own LoRAs.
+    for leftover in ("input", "output", "temp", "models/loras/user"):
+        shutil.rmtree(root / "ComfyUI" / leftover, ignore_errors=True)
+    return True
+
+
+def _warm_put(root: Path, fingerprint: str) -> None:
+    """Park the restored tree where the next job on this runtime can pick it up."""
+    tree = root / "ComfyUI"
+    if not tree.is_dir():
+        return
+    warm = root.parent / ".warm"
+    try:
+        warm.mkdir(mode=0o700, exist_ok=True)
+        (warm / "state.json").unlink(missing_ok=True)
+        shutil.rmtree(warm / "ComfyUI", ignore_errors=True)
+        tree.rename(warm / "ComfyUI")
+        _atomic_json(warm / "state.json", {"fingerprint": fingerprint, "saved_at": time.time()})
+    except OSError:  # the next job simply restores from the cache again
+        shutil.rmtree(warm / "ComfyUI", ignore_errors=True)
+
+
 def _restore_env(
     root: Path, commit: str, timeout: float, cache: "DriveCache | None", build: bool, custom_nodes: list[dict] | None = None
 ) -> dict:
@@ -811,112 +876,124 @@ def _run_comfy(root: Path, payload: dict, manifest: dict, graph: dict, stages: _
     comfy = root / "ComfyUI"
     _check_loras(graph, manifest, (payload.get("snapshot") or {}).get("lora_files") or [])
     timeout = min(float(payload.get("download_timeout_seconds", 600)), 600)
-    stages.start("restore_env")
-    env = _restore_env(root, commit, timeout, _drive_cache(payload, "runtime_folder_id"), build=False,
-                       custom_nodes=_reviewed_custom_nodes(manifest.get("custom_nodes")))
-    stages.start("restore_weights")
-    weights = _restore_weights(comfy, manifest, timeout, _drive_cache(payload), prep=False)
-    user_loras = (payload.get("snapshot") or {}).get("lora_files") or []
-    if user_loras:
-        stages.start("restore_loras")
-        _restore_user_loras(comfy, user_loras, _drive_cache(payload))
-    _write_input_files(comfy, payload.get("snapshot") or {})
-    stages.start("comfy_start")
-    log_path = root / "comfy.log"
-    log = log_path.open("ab", buffering=0)
-    process = None
+    nodes = _reviewed_custom_nodes(manifest.get("custom_nodes"))
+    checked = _validate_weights(manifest)
+    fingerprint = _warm_fingerprint(commit, nodes, checked)
+    if _warm_take(root, fingerprint, nodes, checked):
+        # Same runtime, same environment: the previous job left it restored. Nothing to download.
+        stages.start("warm_reuse")
+        env = {"source": "warm"}
+        weights = [{"target": w["target"], "sha256": w["sha256"], "source": "warm", "seconds": 0.0} for w in checked]
+    else:
+        stages.start("restore_env")
+        env = _restore_env(root, commit, timeout, _drive_cache(payload, "runtime_folder_id"), build=False,
+                           custom_nodes=nodes)
+        stages.start("restore_weights")
+        weights = _restore_weights(comfy, manifest, timeout, _drive_cache(payload), prep=False)
     try:
-        process = subprocess.Popen(
-            [sys.executable, "main.py", "--listen", "127.0.0.1", "--port", "8188"],
-            cwd=comfy,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            shell=False,
-            start_new_session=True,
-        )
-        deadline = time.time() + min(float(payload.get("max_runtime_minutes", 10)) * 60, 600 * 60)
-        api = "http://127.0.0.1:8188"
-        while time.time() < deadline:
-            try:
-                _http_json(api + "/system_stats", timeout=5)
-                break
-            except WorkerError:
-                if process.poll() is not None:
-                    raise WorkerError("Comfy worker exited during startup")
-                time.sleep(1)
-        else:
-            raise WorkerError("Comfy worker startup timed out")
-        stages.start("sampling")
-        queued = _http_json(api + "/prompt", "POST", {"prompt": graph}, timeout=30)
-        prompt_id = queued.get("prompt_id")
-        if not isinstance(prompt_id, str) or not prompt_id:
-            raise WorkerError("Comfy queue did not return a prompt id")
-        while time.time() < deadline:
-            history = _http_json(api + "/history/" + prompt_id, timeout=30)
-            item = history.get(prompt_id)
-            if not isinstance(item, dict):
-                time.sleep(2)
-                continue
-            status = item.get("status") or {}
-            if status.get("status_str") in {"error", "failed"}:
-                detail = ""
-                for message in status.get("messages") or []:
-                    if isinstance(message, list) and message and message[0] == "execution_error":
-                        data = message[1] if len(message) > 1 and isinstance(message[1], dict) else {}
-                        detail = f"{data.get('node_type')}: {data.get('exception_message')}"
-                raise WorkerError(f"Comfy workflow failed: {detail}"[:500])
-            if status.get("completed") is not True and not item.get("outputs"):
-                time.sleep(2)
-                continue
-            stages.end()
-            outputs = []
-            total = 0
-            output_dir = root / "outputs"
-            output_dir.mkdir(mode=0o700, exist_ok=True)
-            for node_output in (item.get("outputs") or {}).values():
-                if not isinstance(node_output, dict):
+        user_loras = (payload.get("snapshot") or {}).get("lora_files") or []
+        if user_loras:
+            stages.start("restore_loras")
+            _restore_user_loras(comfy, user_loras, _drive_cache(payload))
+        _write_input_files(comfy, payload.get("snapshot") or {})
+        stages.start("comfy_start")
+        log_path = root / "comfy.log"
+        log = log_path.open("ab", buffering=0)
+        process = None
+        try:
+            process = subprocess.Popen(
+                [sys.executable, "main.py", "--listen", "127.0.0.1", "--port", "8188"],
+                cwd=comfy,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                shell=False,
+                start_new_session=True,
+            )
+            deadline = time.time() + min(float(payload.get("max_runtime_minutes", 10)) * 60, 600 * 60)
+            api = "http://127.0.0.1:8188"
+            while time.time() < deadline:
+                try:
+                    _http_json(api + "/system_stats", timeout=5)
+                    break
+                except WorkerError:
+                    if process.poll() is not None:
+                        raise WorkerError("Comfy worker exited during startup")
+                    time.sleep(1)
+            else:
+                raise WorkerError("Comfy worker startup timed out")
+            stages.start("sampling")
+            queued = _http_json(api + "/prompt", "POST", {"prompt": graph}, timeout=30)
+            prompt_id = queued.get("prompt_id")
+            if not isinstance(prompt_id, str) or not prompt_id:
+                raise WorkerError("Comfy queue did not return a prompt id")
+            while time.time() < deadline:
+                history = _http_json(api + "/history/" + prompt_id, timeout=30)
+                item = history.get(prompt_id)
+                if not isinstance(item, dict):
+                    time.sleep(2)
                     continue
-                for category in ("images", "gifs", "videos"):
-                    for entry in node_output.get(category, []) or []:
-                        if not isinstance(entry, dict) or not isinstance(entry.get("filename"), str):
-                            continue
-                        filename = Path(entry["filename"]).name
-                        mime = _OUTPUT_MIME.get(Path(filename).suffix.lower())
-                        if mime is None:  # SaveVideo reports videos under "images"; judge by extension
-                            continue
-                        query = urlencode({'filename':filename,'subfolder':entry.get('subfolder',''),'type':entry.get('type','output')})
-                        request = Request(
-                            api + "/view?" + query, headers={"Accept": "application/octet-stream"}
-                        )
-                        target = output_dir / filename
-                        output_limit = payload.get('_local_artifact_limit', MAX_OUTPUT_BYTES)
-                        with urlopen(request, timeout=30) as response:
-                            size = _stream_output(response, target, output_limit - total)
-                        total += size
-                        outputs.append(
-                            {
-                                "filename": filename,
-                                "mime": mime,
-                                "path": str(target.relative_to(root)),
-                                "size": size,
-                                "metadata": {
-                                    "comfy_commit": commit,
-                                    "weights": weights,
-                                    "env": env,
-                                    "stage_seconds": stages.timings,
-                                },
-                            }
-                        )
-            return outputs
-        raise WorkerError("Comfy execution timed out")
+                status = item.get("status") or {}
+                if status.get("status_str") in {"error", "failed"}:
+                    detail = ""
+                    for message in status.get("messages") or []:
+                        if isinstance(message, list) and message and message[0] == "execution_error":
+                            data = message[1] if len(message) > 1 and isinstance(message[1], dict) else {}
+                            detail = f"{data.get('node_type')}: {data.get('exception_message')}"
+                    raise WorkerError(f"Comfy workflow failed: {detail}"[:500])
+                if status.get("completed") is not True and not item.get("outputs"):
+                    time.sleep(2)
+                    continue
+                stages.end()
+                outputs = []
+                total = 0
+                output_dir = root / "outputs"
+                output_dir.mkdir(mode=0o700, exist_ok=True)
+                for node_output in (item.get("outputs") or {}).values():
+                    if not isinstance(node_output, dict):
+                        continue
+                    for category in ("images", "gifs", "videos"):
+                        for entry in node_output.get(category, []) or []:
+                            if not isinstance(entry, dict) or not isinstance(entry.get("filename"), str):
+                                continue
+                            filename = Path(entry["filename"]).name
+                            mime = _OUTPUT_MIME.get(Path(filename).suffix.lower())
+                            if mime is None:  # SaveVideo reports videos under "images"; judge by extension
+                                continue
+                            query = urlencode({'filename':filename,'subfolder':entry.get('subfolder',''),'type':entry.get('type','output')})
+                            request = Request(
+                                api + "/view?" + query, headers={"Accept": "application/octet-stream"}
+                            )
+                            target = output_dir / filename
+                            output_limit = payload.get('_local_artifact_limit', MAX_OUTPUT_BYTES)
+                            with urlopen(request, timeout=30) as response:
+                                size = _stream_output(response, target, output_limit - total)
+                            total += size
+                            outputs.append(
+                                {
+                                    "filename": filename,
+                                    "mime": mime,
+                                    "path": str(target.relative_to(root)),
+                                    "size": size,
+                                    "metadata": {
+                                        "comfy_commit": commit,
+                                        "weights": weights,
+                                        "env": env,
+                                        "stage_seconds": stages.timings,
+                                    },
+                                }
+                            )
+                return outputs
+            raise WorkerError("Comfy execution timed out")
+        finally:
+            if process is not None and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+            log.close()
     finally:
-        if process is not None and process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-        log.close()
+        _warm_put(root, fingerprint)  # restore succeeded above, so the tree is reusable even if this job failed later
 
 
 def _run_prep(root: Path, payload: dict, manifest: dict, stages: _Stages) -> list[dict]:

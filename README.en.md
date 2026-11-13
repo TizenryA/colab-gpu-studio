@@ -34,6 +34,7 @@ Small bug-fix release, no data migration.
 - **#29** Job list shows Chinese labels for every backend state (e.g. `waiting_for_capacity` → 等待算力), and the "in progress" count includes queued / waiting / allocating jobs.
 - **#30** If a job fails before a runtime is created, its instance is closed as released instead of staying "releasing" forever. File SQLite now uses WAL with a 30 s lock wait to reduce `OperationalError` (database is locked).
 - **#31** The offline workflow preview loads once per workflow instead of reloading on every page refresh, and text versions like `1.0.0` no longer return a 422.
+- **First start** On a fresh database the API and worker no longer race to create tables (`table already exists`); schema creation is serialized across processes.
 - **#27** Windows frontend tests convert the file URL with `fileURLToPath` (thanks @CyrusAuyeung, PR #28).
 
 **Downloads**

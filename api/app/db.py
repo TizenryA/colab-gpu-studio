@@ -110,8 +110,18 @@ class Store:
         self.create_all()
 
     def create_all(self) -> None:
-        with self.db_lock():
-            Base.metadata.create_all(self.engine)
+        lock = self._sqlite_dispatch_lock_path()
+        if lock is None:
+            with self.db_lock():
+                Base.metadata.create_all(self.engine)
+            return
+        # 启动器会同时拉起 API 和 worker 两个进程；首次启动时两边一起建表，
+        # 后到的一方会报 table already exists，所以建表要跨进程串行。
+        from .filelocks import file_lock
+
+        with lock.with_name(lock.name.replace(".dispatch.lock", ".schema.lock")).open("a+") as handle:
+            with file_lock(handle):
+                Base.metadata.create_all(self.engine)
 
     @contextmanager
     def db_lock(self):
